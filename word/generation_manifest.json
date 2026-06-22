@@ -1,0 +1,81 @@
+{
+  "template": "G:\\FreeProgram\\CreateReport\\bin\\template\\价值分析报告-自动生成基底模板.docx",
+  "prompt": "G:\\FreeProgram\\CreateReport\\bin\\template\\价值分析报告自动生成-Prompt.md",
+  "workbook": "G:\\FreeProgram\\CreateReport\\excel\\数据表.xlsx",
+  "sheet": "Sheet1",
+  "reports": [
+    {
+      "row_number": 2,
+      "sequence": "1",
+      "branch": "吴中",
+      "name": "石明京",
+      "filename": "价值分析报告-工行个贷不良资产-吴中-石明京.docx",
+      "report_number": "天地恒安[2026]资评咨字第1004-1号",
+      "debtor_count": 1,
+      "guarantor_included": true,
+      "placement_cost_included": true,
+      "minimum_item": "抵押物可回收金额",
+      "output_status": "success",
+      "warnings": []
+    },
+    {
+      "row_number": 3,
+      "sequence": "2",
+      "branch": "吴中",
+      "name": "王高强",
+      "filename": "价值分析报告-工行个贷不良资产-吴中-王高强.docx",
+      "report_number": "天地恒安[2026]资评咨字第1004-2号",
+      "debtor_count": 1,
+      "guarantor_included": true,
+      "placement_cost_included": true,
+      "minimum_item": "抵押物可回收金额",
+      "output_status": "success",
+      "warnings": []
+    },
+    {
+      "row_number": 4,
+      "sequence": "3",
+      "branch": "吴中",
+      "name": "钟占行",
+      "filename": "价值分析报告-工行个贷不良资产-吴中-钟占行.docx",
+      "report_number": "天地恒安[2026]资评咨字第1004-3号",
+      "debtor_count": 1,
+      "guarantor_included": false,
+      "placement_cost_included": true,
+      "minimum_item": "抵押物可回收金额",
+      "output_status": "success",
+      "warnings": []
+    },
+    {
+      "row_number": 5,
+      "sequence": "4",
+      "branch": "吴中",
+      "name": "李永超",
+      "filename": "价值分析报告-工行个贷不良资产-吴中-李永超.docx",
+      "report_number": "天地恒安[2026]资评咨字第1004-4号",
+      "debtor_count": 2,
+      "guarantor_included": false,
+      "placement_cost_included": true,
+      "minimum_item": "抵押物可回收金额",
+      "output_status": "success",
+      "warnings": [
+        "债务人2段红宇: 身份证号码17位已按校验位补齐: 32032119890920058 -> 320321198909200581"
+      ]
+    },
+    {
+      "row_number": 6,
+      "sequence": "5",
+      "branch": "吴中",
+      "name": "仲路芹",
+      "filename": "价值分析报告-工行个贷不良资产-吴中-仲路芹.docx",
+      "report_number": "天地恒安[2026]资评咨字第1004-5号",
+      "debtor_count": 2,
+      "guarantor_included": false,
+      "placement_cost_included": true,
+      "minimum_item": "资产抵押债权金额",
+      "output_status": "success",
+      "warnings": []
+    }
+  ],
+  "errors": []
+}

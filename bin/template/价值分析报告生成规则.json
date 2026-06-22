@@ -1,0 +1,156 @@
+{
+  "schema_version": "1.0",
+  "template": "价值分析报告-自动生成基底模板.docx",
+  "input": {
+    "workbook": "数据表.xlsx",
+    "sheet": "Sheet1",
+    "record_selector": "序号非空",
+    "one_record_one_report": true
+  },
+  "project_defaults": {
+    "项目年": 2026,
+    "报告年": 2026,
+    "报告批次": "1004",
+    "分析基准日": "2025年12月31日",
+    "报告日期": "2026年3月26日",
+    "报告日期大写": "二〇二六年三月二十六日",
+    "有效期截止日": "2026年6月29日",
+    "折现率": 0.03
+  },
+  "columns": {
+    "A": "序号",
+    "B": "支行",
+    "C": "姓名",
+    "D": "基准日本金",
+    "E": "基准日利息",
+    "F": "基准日本息",
+    "G": "地址",
+    "H": "面积",
+    "I": "第一顺位",
+    "J": "登记类型",
+    "K": "性质",
+    "L": "权利价值",
+    "M": "预计回收",
+    "N": "评估单价",
+    "O": "评估价值",
+    "P": "快速变现系数",
+    "Q": "快速变现价值",
+    "R": "清收完成时间",
+    "S": "折现期限",
+    "T": "折现系数",
+    "U": "折现价值",
+    "V": "处置费用",
+    "W": "安置费用",
+    "X": "可回收金额",
+    "Y": "债权评估值",
+    "Z": "偿债率",
+    "AC": "权证编号",
+    "AD": "证载权利人",
+    "AE:AI": ["债务人1", "债务人1性别", "债务人1民族", "债务人1身份证号码", "债务人1住址"],
+    "AJ:AN": ["债务人2", "债务人2性别", "债务人2民族", "债务人2身份证号码", "债务人2住址"],
+    "AO:AS": ["债务人3", "债务人3性别", "债务人3民族", "债务人3身份证号码", "债务人3住址"],
+    "AT:AX": ["债务人4", "债务人4性别", "债务人4民族", "债务人4身份证号码", "债务人4住址"],
+    "AY": "保证人"
+  },
+  "ignored_columns": ["AA", "AB", "未命名辅助列"],
+  "filename": "价值分析报告-工行个贷不良资产-{支行}-{姓名}.docx",
+  "report_number": "天地恒安[{报告年}]资评咨字第{报告批次}-{序号}号",
+  "formula_checks": {
+    "基准日本息": "基准日本金 + 基准日利息",
+    "评估价值": "ROUND(面积 * 评估单价, 0)",
+    "快速变现价值": "ROUND(评估价值 * 快速变现系数, 0)",
+    "折现系数": "ROUND((1 + 折现率) ** (-折现期限), 4)",
+    "折现价值": "ROUND(快速变现价值 * 折现系数, 0)",
+    "可回收金额": "折现价值 - 处置费用 - 安置费用",
+    "债权评估值": "MIN(基准日本息, 权利价值, 可回收金额)",
+    "偿债率": "债权评估值 / 基准日本息"
+  },
+  "formatting": {
+    "yuan": "#,##0.00",
+    "ten_thousand_yuan": "yuan/10000, round_half_up_2",
+    "area": "0.00",
+    "discount_coefficient": "0.0000",
+    "percentage": "0.00%"
+  },
+  "debtor_rules": {
+    "max_count": 4,
+    "single_labels": ["债务人"],
+    "multiple_labels": ["债务人一", "债务人二", "债务人三", "债务人四"],
+    "overview_joiner": "及",
+    "table_joiner": "、",
+    "ethnicity_suffix": "族",
+    "delete_empty_debtor_paragraphs": true,
+    "id_card": {
+      "valid_length": 18,
+      "repair_17_digit_by_checksum": true,
+      "invalid_18_digit_action": "error"
+    }
+  },
+  "guarantor_rules": {
+    "condition": "保证人非空",
+    "empty_action": "删除债务责任关联方简介整个章节并重编号",
+    "nonempty_action": "保留章节并至少填写名称",
+    "enrichment": "仅使用可核验公开信息；查不到时删除空字段行；禁止编造"
+  },
+  "floor_rule": {
+    "source": "地址",
+    "algorithm": "取最后一个室之前的最终房号；通常 floor = int(room_number) // 100",
+    "examples": {
+      "406室": "4层",
+      "603室": "6层",
+      "1901室": "19层",
+      "3-402室": "4层"
+    },
+    "ambiguous_action": "error_or_explicit_override"
+  },
+  "placement_cost_rules": {
+    "primary_field": "安置费用",
+    "consistency_field": "性质",
+    "positive": {
+      "title": "抵押物处置费用及安置费用的确定",
+      "formula": "抵押物折现价值-处置费用-安置费用",
+      "unique_home_sentence": true
+    },
+    "zero_or_blank": {
+      "title": "抵押物处置费用的确定",
+      "formula": "抵押物折现价值-处置费用",
+      "non_unique_home_sentence": true,
+      "forbid_minus_zero": true
+    }
+  },
+  "minimum_item_rules": {
+    "可回收金额": "抵押物可回收金额",
+    "基准日本息": "资产抵押债权金额",
+    "权利价值": "抵押权利价值",
+    "tie_action": "在正文明确并列最低并加入warning"
+  },
+  "special_mappings": {
+    "预计清收正文日期": "预计回收(M)",
+    "不使用": "清收完成时间(R)",
+    "抵押物用途": "住宅"
+  },
+  "docx_processing": {
+    "preserve_formatting": true,
+    "search_stories": ["document", "tables", "headers", "footers", "textboxes"],
+    "cross_run_replacement": true,
+    "delete_optional_full_blocks": true,
+    "update_fields_and_toc": true,
+    "remove_highlights": true,
+    "forbid_remaining_tokens": true
+  },
+  "validation": {
+    "money_tolerance_yuan": 1,
+    "coefficient_tolerance": 0.0001,
+    "percentage_point_tolerance": 0.01,
+    "must_scan_for": ["{{", "}}", "旧姓名", "旧报告编号", "二选一斜杠文本"],
+    "visual_checks": ["表格溢出", "文字遮挡", "异常空白页", "明显格式变化"]
+  },
+  "placeholders": [
+    "保证人名称", "保证人成立日期", "保证人法定代表人", "保证人类型", "保证人经营范围", "保证人统一社会信用代码", "保证人营业场所",
+    "债务人1", "债务人1住址", "债务人1性别", "债务人1民族显示", "债务人1称谓", "债务人1身份证号码",
+    "债务人2", "债务人2住址", "债务人2性别", "债务人2民族显示", "债务人2称谓", "债务人2身份证号码",
+    "债务人3", "债务人3住址", "债务人3性别", "债务人3民族显示", "债务人3称谓", "债务人3身份证号码",
+    "债务人4", "债务人4住址", "债务人4性别", "债务人4民族显示", "债务人4称谓", "债务人4身份证号码",
+    "债务人", "债务人姓名_及", "债权评估值", "偿债率百分比", "分析基准日", "利息万元", "单价", "可回收公式", "可回收计算式", "可回收金额", "坐落", "基准日本息", "处置费用", "姓名", "安置费用标题后缀", "安置费用说明", "层", "市值", "序号", "快速变现价值", "快速变现系数", "折现价值", "折现期限", "折现率百分比", "折现系数", "报告年", "报告批次", "报告日期", "报告日期大写", "最低值名称", "有效期截止日", "本息万元", "本金万元", "权利人", "权利价值", "权利价值万元", "权证号", "评估值万元", "面积", "项目年", "预计回收"
+  ]
+}
