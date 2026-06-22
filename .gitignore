@@ -1,0 +1,17 @@
+api.txt
+*.key
+*.pem
+*.p12
+.env
+.env.*
+
+.venv/
+venv/
+.venv_create_report/
+
+__pycache__/
+*.py[cod]
+
+word/
+~$*.docx
+~$*.docm

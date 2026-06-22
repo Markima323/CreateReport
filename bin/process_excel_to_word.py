@@ -17,6 +17,7 @@ import re
 import shutil
 import sys
 import tempfile
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
@@ -24,6 +25,9 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 from zipfile import ZIP_DEFLATED, ZipFile
 from xml.sax.saxutils import escape as xml_escape
+
+from docx.oxml import OxmlElement
+from docx.text.paragraph import Paragraph
 
 try:
     import openpyxl
@@ -45,13 +49,13 @@ except Exception:  # pragma: no cover - import guard
 
 
 DEFAULT_PROJECT_VALUES: Dict[str, Any] = {
-    "项目年": 2026,
-    "报告年": 2026,
-    "报告批次": "1004",
-    "分析基准日": "2025年12月31日",
-    "报告日期": "2026年3月26日",
-    "报告日期大写": "二〇二六年三月二十六日",
-    "有效期截止日": "2026年6月29日",
+    "项目年": 2025,
+    "报告年": 2025,
+    "报告批次": "1017",
+    "分析基准日": "2025年6月30日",
+    "报告日期": "2025年10月16日",
+    "报告日期大写": "二〇二五年十月十六日",
+    "有效期截止日": "2025年12月30日",
     "折现率": 0.03,
 }
 
@@ -126,6 +130,7 @@ class PreparedReport:
     minimum_item: str
     replacements: Dict[str, str]
     conclusion_text: str
+    guarantor_extra_lines: List[str]
     warnings: List[str]
 
 
@@ -202,11 +207,19 @@ def fmt_percent(value: Decimal) -> str:
     return f"{fmt_decimal(value * Decimal('100'), 2)}%"
 
 
+def fmt_percent_compact(value: Decimal) -> str:
+    return f"{fmt_plain_number(value * Decimal('100'))}%"
+
+
 def sanitize_filename_part(value: str) -> Tuple[str, Optional[str]]:
     sanitized = ILLEGAL_FILENAME_CHARS.sub("-", value).strip()
     if sanitized != value:
         return sanitized, f"文件名非法字符已替换: {value} -> {sanitized}"
     return sanitized, None
+
+
+def normalize_certificate_number(value: Any) -> str:
+    return clean_text(value).replace("(", "（").replace(")", "）")
 
 
 def id_card_checksum(first17: str) -> str:
@@ -340,6 +353,7 @@ def build_prepared_report(
     row_number: int,
     values: Dict[str, Any],
     project: Dict[str, Any],
+    known_guarantors: Dict[str, Dict[str, Any]],
 ) -> PreparedReport:
     warnings: List[str] = []
     required = ["序号", "支行", "姓名", "地址", "面积", "权利价值", "预计回收", "评估单价", "权证编号", "证载权利人"]
@@ -437,12 +451,12 @@ def build_prepared_report(
             "同时，由于抵押物为债务人的唯一住房，需考虑安置费用，"
             f"根据委托人提供的资料，本次考虑安置费用为{fmt_yuan(placement_cost)}元。"
         )
-        recover_formula = "抵押物折现价值-处置费用-安置费用"
+        recover_formula = "抵押物折现价值-抵押物处置费用-安置费用"
         recover_calculation = f"{fmt_yuan(discounted_value)}-{fmt_yuan(disposal_cost)}-{fmt_yuan(placement_cost)}"
     else:
         placement_title_suffix = ""
         placement_sentence = "同时，由于抵押物并非债务人的唯一住房，无需考虑安置费用。"
-        recover_formula = "抵押物折现价值-处置费用"
+        recover_formula = "抵押物折现价值-抵押物处置费用"
         recover_calculation = f"{fmt_yuan(discounted_value)}-{fmt_yuan(disposal_cost)}"
 
     if "非唯一" in property_nature and has_placement_cost:
@@ -486,16 +500,23 @@ def build_prepared_report(
 
     guarantor = clean_text(values.get("保证人"))
     debtor_names_overview = "及".join(debtor.name for debtor in debtors)
+    if guarantor:
+        debtor_names_overview = f"{debtor_names_overview}，债务责任关联方为{guarantor}"
     debtor_names_table = "、".join(debtor.name for debtor in debtors)
+
+    guarantor_details = known_guarantors.get(guarantor, {}) if guarantor else {}
+    guarantor_extra_lines = [
+        clean_text(line) for line in guarantor_details.get("经营范围附加行", []) if clean_text(line)
+    ]
 
     replacements: Dict[str, str] = {
         "保证人名称": guarantor,
-        "保证人成立日期": "",
-        "保证人法定代表人": "",
-        "保证人类型": "",
-        "保证人经营范围": "",
-        "保证人统一社会信用代码": "",
-        "保证人营业场所": "",
+        "保证人成立日期": clean_text(guarantor_details.get("成立日期")),
+        "保证人法定代表人": clean_text(guarantor_details.get("法定代表人")),
+        "保证人类型": clean_text(guarantor_details.get("类型")),
+        "保证人经营范围": clean_text(guarantor_details.get("经营范围")),
+        "保证人统一社会信用代码": clean_text(guarantor_details.get("统一社会信用代码")),
+        "保证人营业场所": clean_text(guarantor_details.get("营业场所")),
         "债务人": debtor_names_table,
         "债务人姓名_及": debtor_names_overview,
         "债权评估值": fmt_yuan(debt_value),
@@ -516,10 +537,10 @@ def build_prepared_report(
         "市值": fmt_yuan(market_value),
         "序号": sequence,
         "快速变现价值": fmt_yuan(quick_value),
-        "快速变现系数": fmt_decimal(quick_coeff, 2),
+        "快速变现系数": fmt_plain_number(quick_coeff),
         "折现价值": fmt_yuan(discounted_value),
         "折现期限": fmt_plain_number(discount_term),
-        "折现率百分比": fmt_percent(discount_rate),
+        "折现率百分比": fmt_percent_compact(discount_rate),
         "折现系数": fmt_decimal(discount_coeff, 4),
         "报告年": report_year,
         "报告批次": report_batch,
@@ -532,7 +553,7 @@ def build_prepared_report(
         "权利人": clean_text(values["证载权利人"]),
         "权利价值": fmt_yuan(right_value),
         "权利价值万元": fmt_wanyuan(right_value),
-        "权证号": clean_text(values["权证编号"]),
+        "权证号": normalize_certificate_number(values["权证编号"]),
         "评估值万元": fmt_wanyuan(debt_value),
         "面积": fmt_area(area),
         "项目年": clean_text(project["项目年"]),
@@ -577,6 +598,7 @@ def build_prepared_report(
         minimum_item=minimum_item,
         replacements=replacements,
         conclusion_text=conclusion,
+        guarantor_extra_lines=guarantor_extra_lines,
         warnings=warnings,
     )
 
@@ -597,6 +619,18 @@ def set_paragraph_text(paragraph: Any, text: str) -> None:
             run.font.highlight_color = None
     else:
         paragraph.add_run(text)
+
+
+def insert_paragraph_after(paragraph: Any, text: str) -> Any:
+    new_element = OxmlElement("w:p")
+    if paragraph._p.pPr is not None:
+        new_element.append(deepcopy(paragraph._p.pPr))
+    paragraph._p.addnext(new_element)
+    new_paragraph = Paragraph(new_element, paragraph._parent)
+    run = new_paragraph.add_run(text)
+    if paragraph.runs and paragraph.runs[0]._r.rPr is not None:
+        run._r.insert(0, deepcopy(paragraph.runs[0]._r.rPr))
+    return new_paragraph
 
 
 def iter_paragraphs(container: Any) -> Iterable[Any]:
@@ -642,6 +676,85 @@ def apply_literal_adjustments(doc: Any, has_guarantor: bool) -> None:
             set_paragraph_text(paragraph, adjusted)
 
 
+def apply_static_toc(doc: Any, report: PreparedReport) -> None:
+    if report.guarantor_included:
+        toc_lines = {
+            "声": "声  明\t1",
+            "价值分析报告摘要": "价值分析报告摘要\t2",
+            "价值分析报告": "价值分析报告\t4",
+            "一、": "一、委托人、债务人及债务责任关联方简介\t4",
+            "二、": "二、价值分析目的\t5",
+            "三、": "三、价值分析对象和价值分析范围\t5",
+            "四、": "四、价值类型\t6",
+            "五、": "五、价值分析基准日\t6",
+            "六、": "六、价值分析思路和方法\t6",
+            "七、": "七、价值分析程序实施过程和情况\t9",
+            "八、": "八、价值分析假设\t11",
+            "九、": "九、价值分析结论\t11",
+            "十、": "十、特别事项说明\t12",
+            "十一、": "十一、价值分析报告使用限制说明\t13",
+            "十二、": "十二、价值分析报告日\t13",
+            "十三、": "十三、资产评估机构印章\t14",
+            "价值分析报告附件": "价值分析报告附件\t15",
+        }
+    elif report.debtor_count == 1:
+        toc_lines = {
+            "声": "声  明\t1",
+            "价值分析报告摘要": "价值分析报告摘要\t2",
+            "价值分析报告": "价值分析报告\t4",
+            "一、": "一、委托人、债务人及债务责任关联方简介\t4",
+            "二、": "二、价值分析目的\t5",
+            "三、": "三、价值分析对象和价值分析范围\t5",
+            "四、": "四、价值类型\t5",
+            "五、": "五、价值分析基准日\t6",
+            "六、": "六、价值分析思路和方法\t6",
+            "七、": "七、价值分析程序实施过程和情况\t9",
+            "八、": "八、价值分析假设\t10",
+            "九、": "九、价值分析结论\t11",
+            "十、": "十、特别事项说明\t11",
+            "十一、": "十一、价值分析报告使用限制说明\t12",
+            "十二、": "十二、价值分析报告日\t13",
+            "十三、": "十三、资产评估机构印章\t13",
+            "价值分析报告附件": "价值分析报告附件\t14",
+        }
+    else:
+        toc_lines = {
+            "声": "声  明\t1",
+            "价值分析报告摘要": "价值分析报告摘要\t2",
+            "价值分析报告": "价值分析报告\t4",
+            "一、": "一、委托人、债务人及债务责任关联方简介\t4",
+            "二、": "二、价值分析目的\t5",
+            "三、": "三、价值分析对象和价值分析范围\t5",
+            "四、": "四、价值类型\t5",
+            "五、": "五、价值分析基准日\t6",
+            "六、": "六、价值分析思路和方法\t6",
+            "七、": "七、价值分析程序实施过程和情况\t9",
+            "八、": "八、价值分析假设\t10",
+            "九、": "九、价值分析结论\t11",
+            "十、": "十、特别事项说明\t12",
+            "十一、": "十一、价值分析报告使用限制说明\t13",
+            "十二、": "十二、价值分析报告日\t13",
+            "十三、": "十三、资产评估机构印章\t13",
+            "价值分析报告附件": "价值分析报告附件\t14",
+        }
+
+    in_toc = False
+    ordered_toc_lines = sorted(toc_lines.items(), key=lambda item: len(item[0]), reverse=True)
+    for paragraph in doc.paragraphs:
+        normalized = re.sub(r"\s+", "", paragraph.text)
+        if normalized == "目录":
+            in_toc = True
+            continue
+        if in_toc and normalized == "声明":
+            break
+        if not in_toc:
+            continue
+        for prefix, text in ordered_toc_lines:
+            if paragraph.text.strip().startswith(prefix):
+                set_paragraph_text(paragraph, text)
+                break
+
+
 def delete_optional_blocks(doc: Any, report: PreparedReport) -> None:
     for paragraph in list(doc.paragraphs):
         text = paragraph.text.strip()
@@ -651,13 +764,16 @@ def delete_optional_blocks(doc: Any, report: PreparedReport) -> None:
                 break
 
     if report.guarantor_included:
+        optional_guarantor_fields = [
+            ("统一社会信用代码：{{保证人统一社会信用代码}}", "保证人统一社会信用代码"),
+            ("类    型：{{保证人类型}}", "保证人类型"),
+            ("法定代表人：{{保证人法定代表人}}", "保证人法定代表人"),
+            ("成立日期：{{保证人成立日期}}", "保证人成立日期"),
+            ("营业场所：{{保证人营业场所}}", "保证人营业场所"),
+            ("经营范围：{{保证人经营范围}}", "保证人经营范围"),
+        ]
         removable_prefixes = [
-            "统一社会信用代码：{{保证人统一社会信用代码}}",
-            "类    型：{{保证人类型}}",
-            "法定代表人：{{保证人法定代表人}}",
-            "成立日期：{{保证人成立日期}}",
-            "营业场所：{{保证人营业场所}}",
-            "经营范围：{{保证人经营范围}}",
+            prefix for prefix, key in optional_guarantor_fields if not report.replacements.get(key)
         ]
     else:
         removable_prefixes = [
@@ -704,6 +820,24 @@ def replace_placeholders(doc: Any, report: PreparedReport) -> None:
         replace_placeholders_in_paragraph(paragraph, report.replacements)
 
 
+def add_guarantor_extra_lines(doc: Any, report: PreparedReport) -> None:
+    if not report.guarantor_extra_lines:
+        return
+    in_guarantor_block = False
+    for paragraph in doc.paragraphs:
+        text = paragraph.text.strip()
+        if text.startswith("保证人："):
+            in_guarantor_block = True
+            continue
+        if in_guarantor_block and text.startswith("委托合同约定的价值分析报告使用人"):
+            return
+        if in_guarantor_block and text.startswith("经营范围："):
+            current = paragraph
+            for line in report.guarantor_extra_lines:
+                current = insert_paragraph_after(current, line)
+            return
+
+
 def postprocess_docx_xml(path: Path, replacements: Dict[str, str]) -> None:
     with tempfile.NamedTemporaryFile(delete=False, suffix=".docx") as fp:
         temp_path = Path(fp.name)
@@ -716,8 +850,7 @@ def postprocess_docx_xml(path: Path, replacements: Dict[str, str]) -> None:
                     for key, value in replacements.items():
                         text = text.replace("{{" + key + "}}", xml_escape(value))
                     text = re.sub(r"<w:highlight\b[^>]*/>", "", text)
-                    if info.filename == "word/settings.xml" and "<w:updateFields" not in text:
-                        text = text.replace("</w:settings>", '<w:updateFields w:val="true"/></w:settings>')
+                    text = re.sub(r"<w:updateFields\b[^>]*/>", "", text)
                     data = text.encode("utf-8")
                 target.writestr(info, data)
         shutil.move(str(temp_path), str(path))
@@ -747,8 +880,9 @@ def scan_docx(path: Path) -> List[str]:
 def render_report(template_file: Path, output_file: Path, report: PreparedReport) -> List[str]:
     doc = Document(template_file)
     delete_optional_blocks(doc, report)
-    apply_literal_adjustments(doc, report.guarantor_included)
+    apply_static_toc(doc, report)
     replace_placeholders(doc, report)
+    add_guarantor_extra_lines(doc, report)
     clear_highlights(doc)
     output_file.parent.mkdir(parents=True, exist_ok=True)
     doc.save(str(output_file))
@@ -776,8 +910,11 @@ def resolve_defaults(project_root: Path) -> Dict[str, Path]:
     }
 
 
-def load_project_values(rules_file: Path) -> Dict[str, Any]:
-    rules = json.loads(rules_file.read_text(encoding="utf-8-sig"))
+def load_rules(rules_file: Path) -> Dict[str, Any]:
+    return json.loads(rules_file.read_text(encoding="utf-8-sig"))
+
+
+def load_project_values(rules: Dict[str, Any]) -> Dict[str, Any]:
     project = dict(DEFAULT_PROJECT_VALUES)
     project.update(rules.get("project_defaults", {}))
     return project
@@ -820,7 +957,9 @@ def main() -> int:
     if not prompt_text:
         raise ValueError(f"Prompt文件为空: {prompt_file}")
 
-    project = load_project_values(rules_file)
+    rules = load_rules(rules_file)
+    project = load_project_values(rules)
+    known_guarantors = rules.get("known_guarantors", {})
     workbook = openpyxl.load_workbook(workbook_file, data_only=True)
     if args.sheet not in workbook.sheetnames:
         raise ValueError(f"Excel中不存在工作表 {args.sheet}; 可用工作表: {', '.join(workbook.sheetnames)}")
@@ -850,7 +989,7 @@ def main() -> int:
         name = clean_text(values.get("姓名"))
         print(f"Processing row {row_number} | 序号 {sequence} | {name}")
         try:
-            report = build_prepared_report(row_number, values, project)
+            report = build_prepared_report(row_number, values, project, known_guarantors)
             output_file = word_dir / report.filename
             validation_issues = render_report(template_file, output_file, report)
             all_warnings = report.warnings + validation_issues
