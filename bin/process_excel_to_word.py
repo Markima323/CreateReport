@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Generate one Word value-analysis report per non-empty Sheet1 row.
+Generate one Word value-analysis report per complete image-extracted JSON record.
 
 Inputs default to:
 1) bin/template/价值分析报告-自动生成基底模板.docx
 2) bin/template/价值分析报告自动生成-Prompt.md
 3) bin/template/价值分析报告生成规则.json
-4) excel/数据表.xlsx
+4) json/图片提取数据.json
 """
 
 from __future__ import annotations
@@ -32,15 +32,6 @@ from xml.sax.saxutils import escape as xml_escape
 
 from docx.oxml import OxmlElement
 from docx.text.paragraph import Paragraph
-
-try:
-    import openpyxl
-except Exception:  # pragma: no cover - import guard
-    print(
-        "Missing dependency: openpyxl. Install with: pip install -r bin/requirements.txt",
-        file=sys.stderr,
-    )
-    raise
 
 try:
     from docx import Document
@@ -309,7 +300,7 @@ def choose_cached_or_computed(
         return computed
     cached = to_decimal(raw, field_name)
     if abs(cached - computed) > tolerance:
-        warnings.append(f"{field_name}与规则复核值不一致: Excel={cached}, 复核={computed}")
+        warnings.append(f"{field_name}与规则复核值不一致: 输入={cached}, 复核={computed}")
     return cached
 
 
@@ -790,10 +781,22 @@ class GeminiInteractionsClient:
                 ) as response:
                     return json.loads(response.read().decode("utf-8"))
             except urllib.error.HTTPError as exc:
-                if exc.code in {429, 500, 502, 503, 504} and attempt < 2:
+                body = exc.read().decode("utf-8", errors="replace")
+                billing_failure = any(
+                    marker in body.lower()
+                    for marker in (
+                        "prepayment credits are depleted",
+                        "billing",
+                        "insufficient",
+                    )
+                )
+                if (
+                    not billing_failure
+                    and exc.code in {429, 500, 502, 503, 504}
+                    and attempt < 2
+                ):
                     time.sleep(2**attempt)
                     continue
-                body = exc.read().decode("utf-8", errors="replace")
                 raise RuntimeError(f"Gemini API HTTP {exc.code}: {body}") from exc
             except urllib.error.URLError as exc:
                 if attempt < 2:
@@ -931,9 +934,9 @@ def build_gemini_input(
     return (
         f"{prompt_text}\n\n"
         "## 本次 Gemini 任务\n"
-        "你只负责审核下面这条本地生成计划，并在保证人非空时核验 Excel 未提供的企业信息。"
+        "你只负责审核下面这条本地生成计划，并在保证人非空时核验 JSON 未提供的企业信息。"
         "不要输出报告正文，不要改写金额，不要推断债务人个人信息。"
-        "Excel 已提供的保证人字段具有最高优先级，返回时必须原样保留；"
+        "本地 JSON 已提供的保证人字段具有最高优先级，返回时必须原样保留；"
         "未能从可靠网页核验的字段返回空字符串。"
         "如果保证人为空，guarantor 的所有字段均返回空值。\n\n"
         + json.dumps(review_payload, ensure_ascii=False, indent=2, default=str)
@@ -1014,7 +1017,7 @@ def call_gemini(
     if expected_guarantor and returned_guarantor != expected_guarantor:
         warnings.append(
             f"保证人名称未精确匹配，已拒绝 Gemini 企业信息: "
-            f"Excel={expected_guarantor}, Gemini={returned_guarantor or '空'}"
+            f"JSON={expected_guarantor}, Gemini={returned_guarantor or '空'}"
         )
         details = {}
         sources = []
@@ -1361,12 +1364,11 @@ def find_single_file(directory: Path, pattern: str, description: str) -> Path:
 
 def resolve_defaults(project_root: Path) -> Dict[str, Path]:
     template_dir = project_root / "bin" / "template"
-    excel_dir = project_root / "excel"
     return {
         "rules_file": find_single_file(template_dir, "*规则.json", "规则JSON"),
         "template_file": find_single_file(template_dir, "*基底模板.docx", "Word模板"),
         "prompt_file": find_single_file(template_dir, "*Prompt.md", "Prompt文件"),
-        "workbook": excel_dir / "数据表.xlsx",
+        "records_file": project_root / "json" / "图片提取数据.json",
     }
 
 
@@ -1394,6 +1396,71 @@ def load_gemini_api_key(api_key_file: Path) -> str:
     )
 
 
+def load_records(records_file: Path) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    payload = json.loads(records_file.read_text(encoding="utf-8-sig"))
+    if not isinstance(payload, dict):
+        raise ValueError(f"图片提取 JSON 顶层必须是对象: {records_file}")
+    raw_records = payload.get("records", [])
+    extraction_errors = payload.get("errors", [])
+    if not isinstance(raw_records, list):
+        raise ValueError(f"图片提取 JSON 的 records 必须是数组: {records_file}")
+    records: List[Dict[str, Any]] = []
+    errors: List[Dict[str, Any]] = []
+    for index, item in enumerate(raw_records, start=1):
+        if not isinstance(item, dict):
+            errors.append(
+                {
+                    "row_number": index,
+                    "output_status": "error",
+                    "error": "图片提取记录不是 JSON 对象",
+                }
+            )
+            continue
+        data = item.get("data")
+        missing_fields = item.get("missing_fields") or []
+        if not isinstance(data, dict):
+            errors.append(
+                {
+                    "row_number": index,
+                    "folder": clean_text(item.get("folder")),
+                    "output_status": "error",
+                    "error": "图片提取记录缺少 data 对象",
+                }
+            )
+            continue
+        if missing_fields:
+            errors.append(
+                {
+                    "row_number": index,
+                    "folder": clean_text(item.get("folder")),
+                    "sequence": clean_text(data.get("序号")),
+                    "name": clean_text(data.get("姓名")),
+                    "output_status": "error",
+                    "error": "图片数据缺少生成字段: "
+                    + ", ".join(clean_text(field) for field in missing_fields),
+                }
+            )
+            continue
+        record = dict(data)
+        record["_source_folder"] = clean_text(item.get("folder"))
+        record["_source_images"] = item.get("images") or []
+        record["_extraction_warnings"] = item.get("warnings") or []
+        record["_gemini"] = item.get("gemini") or {}
+        records.append(record)
+    if isinstance(extraction_errors, list):
+        for item in extraction_errors:
+            if isinstance(item, dict):
+                errors.append(
+                    {
+                        "folder": clean_text(item.get("folder")),
+                        "output_status": "error",
+                        "error": clean_text(item.get("error"))
+                        or "图片提取失败",
+                    }
+                )
+    return records, errors
+
+
 def validate_document_type(rules: Dict[str, Any], document_type: str) -> None:
     config = rules.get("document_types", {}).get(document_type)
     if not config:
@@ -1405,12 +1472,13 @@ def validate_document_type(rules: Dict[str, Any], document_type: str) -> None:
 
 def build_parser(project_root: Path) -> argparse.ArgumentParser:
     defaults = resolve_defaults(project_root)
-    parser = argparse.ArgumentParser(description="Generate one value-analysis Word report per Sheet1 data row.")
+    parser = argparse.ArgumentParser(
+        description="Generate one value-analysis Word report per image-extracted JSON record."
+    )
     parser.add_argument("--template-file", default=str(defaults["template_file"]))
     parser.add_argument("--prompt-file", default=str(defaults["prompt_file"]))
     parser.add_argument("--rules-file", default=str(defaults["rules_file"]))
-    parser.add_argument("--workbook", default=str(defaults["workbook"]))
-    parser.add_argument("--sheet", default="Sheet1")
+    parser.add_argument("--records-file", default=str(defaults["records_file"]))
     parser.add_argument("--word-dir", default=str(project_root / "word"))
     parser.add_argument("--document-type", choices=["1", "2"], default="1")
     parser.add_argument("--model", default=None)
@@ -1444,7 +1512,7 @@ def main() -> int:
     template_file = Path(args.template_file).expanduser().resolve()
     prompt_file = Path(args.prompt_file).expanduser().resolve()
     rules_file = Path(args.rules_file).expanduser().resolve()
-    workbook_file = Path(args.workbook).expanduser().resolve()
+    records_file = Path(args.records_file).expanduser().resolve()
     word_dir = Path(args.word_dir).expanduser().resolve()
     api_key_file = Path(args.api_key_file).expanduser().resolve()
 
@@ -1452,7 +1520,7 @@ def main() -> int:
         ("Word模板", template_file),
         ("Prompt文件", prompt_file),
         ("规则JSON", rules_file),
-        ("Excel数据表", workbook_file),
+        ("图片提取JSON", records_file),
     ]:
         if not path.is_file():
             raise FileNotFoundError(f"{label}不存在: {path}")
@@ -1477,11 +1545,7 @@ def main() -> int:
     if gemini_enabled:
         gemini_client = create_gemini_client(load_gemini_api_key(api_key_file))
 
-    workbook = openpyxl.load_workbook(workbook_file, data_only=True)
-    if args.sheet not in workbook.sheetnames:
-        raise ValueError(f"Excel中不存在工作表 {args.sheet}; 可用工作表: {', '.join(workbook.sheetnames)}")
-    ws = workbook[args.sheet]
-    header_columns = build_header_columns(ws)
+    records, extraction_errors = load_records(records_file)
     template_field_counts = get_field_code_counts(template_file)
     expected_field_counts = {
         field_name: template_field_counts[field_name]
@@ -1492,8 +1556,8 @@ def main() -> int:
         "document_type": args.document_type,
         "template": str(template_file),
         "prompt": str(prompt_file),
-        "workbook": str(workbook_file),
-        "sheet": args.sheet,
+        "records_file": str(records_file),
+        "source_type": "image_folders",
         "ai": {
             "provider": "Google Gemini",
             "model": model,
@@ -1503,27 +1567,28 @@ def main() -> int:
         },
         "template_field_counts": template_field_counts,
         "reports": [],
-        "errors": [],
+        "errors": list(extraction_errors),
     }
 
     total_records = 0
     generated = 0
     print(f"Using template: {template_file}")
     print(f"Using prompt: {prompt_file}")
-    print(f"Using workbook: {workbook_file}")
+    print(f"Using image records: {records_file}")
     print(f"Document type: {args.document_type}")
     print(
         f"AI audit: {'disabled' if not gemini_enabled else f'Google Gemini / {model} / Interactions API'}"
     )
 
-    for row_number in range(2, ws.max_row + 1):
-        if is_blank(ws.cell(row_number, FIELD_COLUMNS["序号"]).value):
-            continue
+    for row_number, values in enumerate(records, start=1):
         total_records += 1
-        values = get_row_values(ws, row_number, header_columns)
         sequence = clean_text(values.get("序号"))
         name = clean_text(values.get("姓名"))
-        print(f"Processing row {row_number} | 序号 {sequence} | {name}")
+        source_folder = clean_text(values.get("_source_folder"))
+        print(
+            f"Processing record {row_number} | 序号 {sequence} | "
+            f"{name} | {source_folder}"
+        )
         try:
             guarantor_name = clean_text(values.get("保证人"))
             saved_guarantor_details = (
@@ -1541,6 +1606,11 @@ def main() -> int:
                 values,
                 project,
                 guarantor_details,
+            )
+            report.warnings.extend(
+                f"图片提取: {clean_text(warning)}"
+                for warning in values.get("_extraction_warnings", [])
+                if clean_text(warning)
             )
             audit: Optional[GeminiAudit] = None
             if gemini_client is not None:
@@ -1571,6 +1641,9 @@ def main() -> int:
                 "sequence": report.sequence,
                 "branch": report.branch,
                 "name": report.name,
+                "source_folder": source_folder,
+                "source_images": values.get("_source_images", []),
+                "image_extraction": values.get("_gemini", {}),
                 "filename": report.filename,
                 "report_number": report.report_number,
                 "debtor_count": report.debtor_count,

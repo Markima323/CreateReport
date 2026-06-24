@@ -13,7 +13,6 @@ from typing import Callable
 
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
-from openpyxl import load_workbook
 
 from process_excel_to_word import (
     create_gemini_client,
@@ -33,7 +32,11 @@ except ImportError:
 BIN_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = BIN_DIR.parent
 PROCESS_SCRIPT = BIN_DIR / "process_excel_to_word.py"
-DEFAULT_WORKBOOK = PROJECT_ROOT / "excel" / "数据表.xlsx"
+IMAGE_PIPELINE_SCRIPT = BIN_DIR / "image_input_pipeline.py"
+DEFAULT_INPUT_DIR = PROJECT_ROOT / "InputPic"
+DEFAULT_RECORDS_FILE = PROJECT_ROOT / "json" / "图片提取数据.json"
+DEFAULT_INDIVIDUAL_RECORDS_DIR = PROJECT_ROOT / "json" / "人员数据"
+DEFAULT_SUPPLEMENTS = BIN_DIR / "template" / "图片输入补充数据.json"
 DEFAULT_TEMPLATE = BIN_DIR / "template" / "价值分析报告-自动生成基底模板.docx"
 DEFAULT_PROMPT = BIN_DIR / "template" / "价值分析报告自动生成-Prompt.md"
 DEFAULT_RULES = BIN_DIR / "template" / "价值分析报告生成规则.json"
@@ -89,7 +92,7 @@ class ReportGeneratorApp:
         self.guarantor_status_var = tk.StringVar(value="")
         self.extraction_in_progress = False
         self._path_entries: list[tk.Entry] = []
-        self.workbook_var = tk.StringVar(value=str(DEFAULT_WORKBOOK))
+        self.input_dir_var = tk.StringVar(value=str(DEFAULT_INPUT_DIR))
         self.template_var = tk.StringVar(value=str(DEFAULT_TEMPLATE))
         self.prompt_var = tk.StringVar(value=str(DEFAULT_PROMPT))
         self.output_var = tk.StringVar(value=str(DEFAULT_OUTPUT))
@@ -207,11 +210,11 @@ class ReportGeneratorApp:
         self._path_row(
             settings,
             0,
-            "Excel 数据",
-            self.workbook_var,
-            self._select_workbook,
+            "图片数据目录",
+            self.input_dir_var,
+            self._select_input_dir,
         )
-        self.workbook_entry = self._path_entries[-1]
+        self.input_dir_entry = self._path_entries[-1]
         self._path_row(
             settings,
             1,
@@ -433,23 +436,20 @@ class ReportGeneratorApp:
     def _register_drop_target(self) -> None:
         if not DND_AVAILABLE:
             return
-        for widget in (self.root, self.workbook_entry):
+        for widget in (self.root, self.input_dir_entry):
             widget.drop_target_register(DND_FILES)
             widget.dnd_bind("<<Drop>>", self._on_drop)
 
     def _on_drop(self, event: object) -> None:
         paths = [Path(item) for item in self.root.tk.splitlist(event.data)]
-        workbook = next((path for path in paths if path.suffix.lower() in {".xlsx", ".xlsm"}), None)
-        if workbook:
-            self.workbook_var.set(str(workbook.resolve()))
+        directory = next((path for path in paths if path.is_dir()), None)
+        if directory:
+            self.input_dir_var.set(str(directory.resolve()))
 
-    def _select_workbook(self) -> None:
-        path = filedialog.askopenfilename(
-            title="选择 Excel 数据表",
-            filetypes=[("Excel 文件", "*.xlsx *.xlsm"), ("所有文件", "*.*")],
-        )
+    def _select_input_dir(self) -> None:
+        path = filedialog.askdirectory(title="选择图片数据根目录")
         if path:
-            self.workbook_var.set(path)
+            self.input_dir_var.set(path)
 
     def _select_template(self) -> None:
         path = filedialog.askopenfilename(
@@ -505,12 +505,13 @@ class ReportGeneratorApp:
         if self.document_type_var.get() != "1":
             return False, "文档类型 2 尚未配置模板和生成规则。"
         for label, raw_path in (
-            ("Excel 数据", self.workbook_var.get()),
             ("Word 模板", self.template_var.get()),
             ("Prompt", self.prompt_var.get()),
         ):
             if not Path(raw_path).expanduser().is_file():
                 return False, f"{label}不存在：\n{raw_path}"
+        if not Path(self.input_dir_var.get()).expanduser().is_dir():
+            return False, f"图片数据目录不存在：\n{self.input_dir_var.get()}"
         if not DEFAULT_RULES.is_file():
             return False, f"规则文件不存在：\n{DEFAULT_RULES}"
         if not self.api_key_var.get().strip():
@@ -543,36 +544,18 @@ class ReportGeneratorApp:
                 temp_path.unlink()
 
     def _find_guarantors(self) -> list[str]:
-        workbook_path = Path(self.workbook_var.get()).expanduser().resolve()
-        workbook = load_workbook(workbook_path, data_only=True, read_only=True)
-        try:
-            if "Sheet1" not in workbook.sheetnames:
-                raise ValueError("Excel 中不存在 Sheet1")
-            sheet = workbook["Sheet1"]
-            headers: dict[str, int] = {}
-            for column in range(1, sheet.max_column + 1):
-                value = sheet.cell(1, column).value
-                header = "".join(str(value or "").split())
-                if header:
-                    headers[header] = column
-            sequence_column = headers.get("序号")
-            guarantor_column = headers.get("保证人")
-            if not sequence_column:
-                raise ValueError("Excel 中未找到“序号”列")
-            if not guarantor_column:
-                return []
-            guarantors: list[str] = []
-            for row in range(2, sheet.max_row + 1):
-                sequence = sheet.cell(row, sequence_column).value
-                if sequence is None or not str(sequence).strip():
-                    continue
-                value = sheet.cell(row, guarantor_column).value
-                guarantor = str(value or "").strip()
-                if guarantor and guarantor not in guarantors:
-                    guarantors.append(guarantor)
-            return guarantors
-        finally:
-            workbook.close()
+        payload = json.loads(
+            DEFAULT_RECORDS_FILE.read_text(encoding="utf-8-sig")
+        )
+        guarantors: list[str] = []
+        for item in payload.get("records", []):
+            if not isinstance(item, dict):
+                continue
+            data = item.get("data") or {}
+            guarantor = str(data.get("保证人") or "").strip()
+            if guarantor and guarantor not in guarantors:
+                guarantors.append(guarantor)
+        return guarantors
 
     def _format_saved_guarantor(self, details: dict) -> str:
         fields = (
@@ -952,16 +935,97 @@ class ReportGeneratorApp:
             return
 
         self.processing = True
-        self.status_var.set("正在识别保证人")
+        self.status_var.set("正在从图片提取 JSON")
         self._refresh_state()
+        self._append_log("开始遍历图片文件夹并调用 Gemini 提取 JSON...")
+        command, environment = self._build_extraction_command()
+        worker = threading.Thread(
+            target=self._image_extraction_worker,
+            args=(command, environment),
+            daemon=True,
+        )
+        worker.start()
+
+    def _console_python(self) -> Path:
+        python_executable = Path(sys.executable)
+        if python_executable.name.lower() == "pythonw.exe":
+            console_python = python_executable.with_name("python.exe")
+            if console_python.is_file():
+                return console_python
+        return python_executable
+
+    def _build_environment(self) -> dict[str, str]:
+        environment = os.environ.copy()
+        if not self.save_key_var.get():
+            environment["GEMINI_API_KEY"] = self.api_key_var.get().strip()
+        return environment
+
+    def _build_extraction_command(self) -> tuple[list[str], dict[str, str]]:
+        command = [
+            str(self._console_python()),
+            str(IMAGE_PIPELINE_SCRIPT),
+            "--input-dir",
+            str(Path(self.input_dir_var.get()).expanduser().resolve()),
+            "--output-file",
+            str(DEFAULT_RECORDS_FILE),
+            "--individual-dir",
+            str(DEFAULT_INDIVIDUAL_RECORDS_DIR),
+            "--supplements-file",
+            str(DEFAULT_SUPPLEMENTS),
+            "--rules-file",
+            str(DEFAULT_RULES),
+            "--model",
+            self.model_var.get(),
+            "--api-key-file",
+            str(API_KEY_FILE),
+        ]
+        return command, self._build_environment()
+
+    def _image_extraction_worker(
+        self,
+        command: list[str],
+        environment: dict[str, str],
+    ) -> None:
+        creation_flags = subprocess.CREATE_NO_WINDOW if sys.platform.startswith("win") else 0
+        try:
+            process = subprocess.Popen(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                env=environment,
+                creationflags=creation_flags,
+            )
+            assert process.stdout is not None
+            for line in process.stdout:
+                self.root.after(0, self._append_log, line)
+            return_code = process.wait()
+            self.root.after(0, self._finish_image_extraction, return_code)
+        except Exception as exc:
+            self.root.after(0, self._finish_generation_error, str(exc))
+
+    def _finish_image_extraction(self, return_code: int) -> None:
+        if return_code != 0:
+            self.processing = False
+            self.status_var.set("图片提取不完整")
+            self._refresh_state()
+            messagebox.showerror(
+                "图片提取未完成",
+                "图片提取出现错误或存在缺失字段，请查看运行日志和 "
+                f"{DEFAULT_RECORDS_FILE}。",
+            )
+            return
         try:
             self.pending_guarantors = self._find_guarantors()
         except Exception as exc:
             self.processing = False
-            self.status_var.set("读取 Excel 失败")
+            self.status_var.set("读取图片 JSON 失败")
             self._refresh_state()
-            messagebox.showerror("读取 Excel 失败", str(exc))
+            messagebox.showerror("读取图片 JSON 失败", str(exc))
             return
+        self._append_log(f"图片 JSON 已生成：{DEFAULT_RECORDS_FILE}")
         if self.pending_guarantors:
             self._append_log(
                 f"识别到 {len(self.pending_guarantors)} 个唯一保证人，"
@@ -984,16 +1048,11 @@ class ReportGeneratorApp:
         worker.start()
 
     def _build_process_command(self) -> tuple[list[str], dict[str, str]]:
-        python_executable = Path(sys.executable)
-        if python_executable.name.lower() == "pythonw.exe":
-            console_python = python_executable.with_name("python.exe")
-            if console_python.is_file():
-                python_executable = console_python
         command = [
-            str(python_executable),
+            str(self._console_python()),
             str(PROCESS_SCRIPT),
-            "--workbook",
-            str(Path(self.workbook_var.get()).expanduser().resolve()),
+            "--records-file",
+            str(DEFAULT_RECORDS_FILE),
             "--template-file",
             str(Path(self.template_var.get()).expanduser().resolve()),
             "--prompt-file",
@@ -1010,10 +1069,7 @@ class ReportGeneratorApp:
             "--api-key-file",
             str(API_KEY_FILE),
         ]
-        environment = os.environ.copy()
-        if not self.save_key_var.get():
-            environment["GEMINI_API_KEY"] = self.api_key_var.get().strip()
-        return command, environment
+        return command, self._build_environment()
 
     def _generation_worker(
         self,
