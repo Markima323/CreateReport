@@ -33,6 +33,10 @@ from xml.sax.saxutils import escape as xml_escape
 from docx.oxml import OxmlElement
 from docx.text.paragraph import Paragraph
 
+for stream in (sys.stdout, sys.stderr):
+    if hasattr(stream, "reconfigure"):
+        stream.reconfigure(encoding="utf-8", errors="replace")
+
 try:
     from docx import Document
 except Exception:  # pragma: no cover - import guard

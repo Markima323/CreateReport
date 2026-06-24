@@ -956,6 +956,8 @@ class ReportGeneratorApp:
 
     def _build_environment(self) -> dict[str, str]:
         environment = os.environ.copy()
+        environment["PYTHONUTF8"] = "1"
+        environment["PYTHONIOENCODING"] = "utf-8"
         if not self.save_key_var.get():
             environment["GEMINI_API_KEY"] = self.api_key_var.get().strip()
         return environment
@@ -963,6 +965,8 @@ class ReportGeneratorApp:
     def _build_extraction_command(self) -> tuple[list[str], dict[str, str]]:
         command = [
             str(self._console_python()),
+            "-X",
+            "utf8",
             str(IMAGE_PIPELINE_SCRIPT),
             "--input-dir",
             str(Path(self.input_dir_var.get()).expanduser().resolve()),
@@ -1011,10 +1015,11 @@ class ReportGeneratorApp:
             self.processing = False
             self.status_var.set("图片提取不完整")
             self._refresh_state()
+            error_message = self._get_image_extraction_error_message()
+            self._append_log(error_message)
             messagebox.showerror(
                 "图片提取未完成",
-                "图片提取出现错误或存在缺失字段，请查看运行日志和 "
-                f"{DEFAULT_RECORDS_FILE}。",
+                error_message,
             )
             return
         try:
@@ -1036,6 +1041,38 @@ class ReportGeneratorApp:
             return
         self._launch_generation()
 
+    def _get_image_extraction_error_message(self) -> str:
+        fallback = (
+            "图片提取出现错误或存在缺失字段，请查看运行日志和：\n"
+            f"{DEFAULT_RECORDS_FILE}"
+        )
+        try:
+            payload = json.loads(
+                DEFAULT_RECORDS_FILE.read_text(encoding="utf-8-sig")
+            )
+            errors = payload.get("errors") or []
+            first_error = str((errors[0] or {}).get("error") or "").strip()
+        except Exception:
+            return fallback
+        lowered = first_error.lower()
+        if (
+            "prepayment credits are depleted" in lowered
+            or "预付费额度已耗尽" in first_error
+        ):
+            return (
+                "Gemini API 预付费额度已耗尽，图片尚未提取。\n\n"
+                "请在 Google AI Studio 中为当前 API Key 所属项目充值，"
+                "或在面板顶部更换一个有可用额度的 Gemini API Key 后重试。"
+            )
+        if "api key" in lowered and any(
+            marker in lowered
+            for marker in ("invalid", "expired", "not valid")
+        ):
+            return "Gemini API Key 无效或已失效，请在面板顶部更换后重试。"
+        if first_error:
+            return f"图片提取失败：\n{first_error}\n\n详情：{DEFAULT_RECORDS_FILE}"
+        return fallback
+
     def _launch_generation(self) -> None:
         self.status_var.set("正在生成")
         self._append_log("开始生成文档...")
@@ -1050,6 +1087,8 @@ class ReportGeneratorApp:
     def _build_process_command(self) -> tuple[list[str], dict[str, str]]:
         command = [
             str(self._console_python()),
+            "-X",
+            "utf8",
             str(PROCESS_SCRIPT),
             "--records-file",
             str(DEFAULT_RECORDS_FILE),

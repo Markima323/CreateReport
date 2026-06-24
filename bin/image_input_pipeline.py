@@ -20,6 +20,10 @@ from process_excel_to_word import (
     load_rules,
 )
 
+for stream in (sys.stdout, sys.stderr):
+    if hasattr(stream, "reconfigure"):
+        stream.reconfigure(encoding="utf-8", errors="replace")
+
 
 SUPPORTED_IMAGE_SUFFIXES = {".bmp", ".jpeg", ".jpg", ".png", ".webp"}
 
@@ -400,6 +404,22 @@ def write_json_atomic(path: Path, payload: Any) -> None:
             temp_path.unlink()
 
 
+def friendly_extraction_error(exc: Exception) -> str:
+    error_text = str(exc)
+    lowered = error_text.lower()
+    if "prepayment credits are depleted" in lowered:
+        return (
+            "Gemini API 预付费额度已耗尽，请在 Google AI Studio 充值，"
+            "或更换有可用额度的 API Key"
+        )
+    if "api key" in lowered and any(
+        marker in lowered
+        for marker in ("invalid", "expired", "not valid")
+    ):
+        return "Gemini API Key 无效或已失效，请更换后重试"
+    return error_text
+
+
 def extract_input_directory(
     input_dir: Path,
     output_file: Path,
@@ -440,8 +460,9 @@ def extract_input_directory(
                 f"缺失字段 {len(record['missing_fields'])}"
             )
         except Exception as exc:
-            errors.append({"folder": folder.name, "error": str(exc)})
-            print(f"  ERROR: {exc}")
+            display_error = friendly_extraction_error(exc)
+            errors.append({"folder": folder.name, "error": display_error})
+            print(f"  ERROR: {display_error}")
             error_text = str(exc).lower()
             if any(
                 marker in error_text
