@@ -24,8 +24,9 @@
     "documentation": "https://ai.google.dev/gemini-api/docs/whats-new-gemini-3.5?hl=zh-cn",
     "thinking_level": "medium",
     "store_interactions": false,
-    "use_google_search_for_guarantor": true
+    "use_google_search_for_guarantor": false
   },
+  "guarantors": {},
   "document_types": {
     "1": {
       "name": "价值分析报告",
@@ -119,7 +120,7 @@
     "condition": "保证人非空",
     "empty_action": "删除债务责任关联方简介整个章节并重编号",
     "nonempty_action": "保留章节并至少填写名称",
-    "enrichment": "仅使用可核验公开信息；查不到时删除空字段行；禁止编造"
+    "enrichment": "用户在面板粘贴企业资料，Gemini 仅提取字段并写入 guarantors；缺少字段时禁止生成"
   },
   "floor_rule": {
     "source": "地址",

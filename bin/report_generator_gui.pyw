@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import ctypes
+import json
 import os
 import subprocess
 import sys
+import tempfile
 import threading
 import traceback
 from pathlib import Path
@@ -11,6 +13,12 @@ from typing import Callable
 
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
+from openpyxl import load_workbook
+
+from process_excel_to_word import (
+    create_gemini_client,
+    extract_guarantor_details_from_text,
+)
 
 try:
     from tkinterdnd2 import DND_FILES, TkinterDnD
@@ -74,6 +82,12 @@ class ReportGeneratorApp:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         self.processing = False
+        self.pending_guarantors: list[str] = []
+        self.current_guarantor = ""
+        self.guarantor_dialog: tk.Toplevel | None = None
+        self.guarantor_source_text: tk.Text | None = None
+        self.guarantor_status_var = tk.StringVar(value="")
+        self.extraction_in_progress = False
         self._path_entries: list[tk.Entry] = []
         self.workbook_var = tk.StringVar(value=str(DEFAULT_WORKBOOK))
         self.template_var = tk.StringVar(value=str(DEFAULT_TEMPLATE))
@@ -87,8 +101,8 @@ class ReportGeneratorApp:
         self.status_var = tk.StringVar(value="就绪")
 
         self.root.title("价值分析报告生成器")
-        self.root.geometry("980x790")
-        self.root.minsize(900, 720)
+        self.root.geometry("980x850")
+        self.root.minsize(900, 780)
         self.root.configure(bg=WINDOW_BG)
         self.root.columnconfigure(0, weight=1)
         self.root.rowconfigure(0, weight=1)
@@ -96,7 +110,7 @@ class ReportGeneratorApp:
         self.main = tk.Frame(self.root, bg=WINDOW_BG, padx=28, pady=22)
         self.main.grid(row=0, column=0, sticky="nsew")
         self.main.columnconfigure(0, weight=1)
-        self.main.rowconfigure(4, weight=1)
+        self.main.rowconfigure(5, weight=1)
 
         self._build_ui()
         self._register_drop_target()
@@ -117,6 +131,68 @@ class ReportGeneratorApp:
             fg=TEXT_DARK,
         ).grid(row=0, column=0, sticky="w", pady=(0, 14))
 
+        key_panel = tk.Frame(
+            self.main,
+            bg=PANEL_BG,
+            highlightbackground=BORDER,
+            highlightthickness=1,
+            padx=20,
+            pady=14,
+        )
+        key_panel.grid(row=1, column=0, sticky="ew", pady=(0, 12))
+        key_panel.columnconfigure(1, weight=1)
+        tk.Label(
+            key_panel,
+            text="Gemini API Key",
+            font=("Microsoft YaHei UI", 10, "bold"),
+            bg=PANEL_BG,
+            fg=TEXT_DARK,
+            anchor="w",
+        ).grid(row=0, column=0, sticky="w")
+        self.api_key_entry = tk.Entry(
+            key_panel,
+            textvariable=self.api_key_var,
+            show="*",
+            font=("Consolas", 10),
+            bg=INPUT_BG,
+            fg=TEXT_DARK,
+            insertbackground=TEXT_DARK,
+            relief="solid",
+            bd=1,
+        )
+        self.api_key_entry.grid(
+            row=0,
+            column=1,
+            sticky="ew",
+            padx=(16, 10),
+            ipady=7,
+        )
+        self.show_key_check = tk.Checkbutton(
+            key_panel,
+            text="显示",
+            variable=self.show_key_var,
+            command=self._toggle_key_visibility,
+            font=("Microsoft YaHei UI", 9),
+            bg=PANEL_BG,
+            fg=TEXT_DARK,
+            activebackground=PANEL_BG,
+            bd=0,
+            highlightthickness=0,
+        )
+        self.show_key_check.grid(row=0, column=2, padx=(0, 8))
+        self.save_key_check = tk.Checkbutton(
+            key_panel,
+            text="保存到本机",
+            variable=self.save_key_var,
+            font=("Microsoft YaHei UI", 9),
+            bg=PANEL_BG,
+            fg=TEXT_DARK,
+            activebackground=PANEL_BG,
+            bd=0,
+            highlightthickness=0,
+        )
+        self.save_key_check.grid(row=0, column=3)
+
         settings = tk.Frame(
             self.main,
             bg=PANEL_BG,
@@ -125,7 +201,7 @@ class ReportGeneratorApp:
             padx=20,
             pady=16,
         )
-        settings.grid(row=1, column=0, sticky="ew")
+        settings.grid(row=2, column=0, sticky="ew")
         settings.columnconfigure(1, weight=1)
 
         self._path_row(
@@ -211,57 +287,8 @@ class ReportGeneratorApp:
         )
         self.model_combo.grid(row=5, column=1, sticky="ew", pady=(12, 0))
 
-        tk.Label(
-            settings,
-            text="API Key",
-            font=("Microsoft YaHei UI", 10, "bold"),
-            bg=PANEL_BG,
-            fg=TEXT_DARK,
-            anchor="w",
-        ).grid(row=6, column=0, sticky="w", pady=(12, 0))
-        key_frame = tk.Frame(settings, bg=PANEL_BG)
-        key_frame.grid(row=6, column=1, sticky="ew", pady=(12, 0))
-        key_frame.columnconfigure(0, weight=1)
-        self.api_key_entry = tk.Entry(
-            key_frame,
-            textvariable=self.api_key_var,
-            show="*",
-            font=("Consolas", 10),
-            bg=INPUT_BG,
-            fg=TEXT_DARK,
-            insertbackground=TEXT_DARK,
-            relief="solid",
-            bd=1,
-        )
-        self.api_key_entry.grid(row=0, column=0, sticky="ew", ipady=6)
-        self.show_key_check = tk.Checkbutton(
-            key_frame,
-            text="显示",
-            variable=self.show_key_var,
-            command=self._toggle_key_visibility,
-            font=("Microsoft YaHei UI", 9),
-            bg=PANEL_BG,
-            fg=TEXT_DARK,
-            activebackground=PANEL_BG,
-            bd=0,
-            highlightthickness=0,
-        )
-        self.show_key_check.grid(row=0, column=1, padx=(10, 0))
-        self.save_key_check = tk.Checkbutton(
-            key_frame,
-            text="保存到本机",
-            variable=self.save_key_var,
-            font=("Microsoft YaHei UI", 9),
-            bg=PANEL_BG,
-            fg=TEXT_DARK,
-            activebackground=PANEL_BG,
-            bd=0,
-            highlightthickness=0,
-        )
-        self.save_key_check.grid(row=0, column=2, padx=(8, 0))
-
         actions = tk.Frame(self.main, bg=WINDOW_BG)
-        actions.grid(row=2, column=0, sticky="ew", pady=(16, 12))
+        actions.grid(row=3, column=0, sticky="ew", pady=(16, 12))
         actions.columnconfigure(0, weight=1)
         left_actions = tk.Frame(actions, bg=WINDOW_BG)
         left_actions.grid(row=0, column=0, sticky="w")
@@ -293,7 +320,7 @@ class ReportGeneratorApp:
         self.run_button.grid(row=0, column=1, sticky="e")
 
         status_bar = tk.Frame(self.main, bg=WINDOW_BG)
-        status_bar.grid(row=3, column=0, sticky="ew", pady=(0, 8))
+        status_bar.grid(row=4, column=0, sticky="ew", pady=(0, 8))
         status_bar.columnconfigure(0, weight=1)
         tk.Label(
             status_bar,
@@ -317,7 +344,7 @@ class ReportGeneratorApp:
             highlightbackground=BORDER,
             highlightthickness=1,
         )
-        log_frame.grid(row=4, column=0, sticky="nsew")
+        log_frame.grid(row=5, column=0, sticky="nsew")
         log_frame.columnconfigure(0, weight=1)
         log_frame.rowconfigure(0, weight=1)
         self.log_text = tk.Text(
@@ -494,6 +521,407 @@ class ReportGeneratorApp:
         if self.save_key_var.get():
             API_KEY_FILE.write_text(self.api_key_var.get().strip(), encoding="utf-8")
 
+    def _load_rules(self) -> dict:
+        return json.loads(DEFAULT_RULES.read_text(encoding="utf-8-sig"))
+
+    def _save_rules(self, rules: dict) -> None:
+        DEFAULT_RULES.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            suffix=".json",
+            dir=DEFAULT_RULES.parent,
+            delete=False,
+        ) as handle:
+            temp_path = Path(handle.name)
+            json.dump(rules, handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
+        try:
+            temp_path.replace(DEFAULT_RULES)
+        finally:
+            if temp_path.exists():
+                temp_path.unlink()
+
+    def _find_guarantors(self) -> list[str]:
+        workbook_path = Path(self.workbook_var.get()).expanduser().resolve()
+        workbook = load_workbook(workbook_path, data_only=True, read_only=True)
+        try:
+            if "Sheet1" not in workbook.sheetnames:
+                raise ValueError("Excel 中不存在 Sheet1")
+            sheet = workbook["Sheet1"]
+            headers: dict[str, int] = {}
+            for column in range(1, sheet.max_column + 1):
+                value = sheet.cell(1, column).value
+                header = "".join(str(value or "").split())
+                if header:
+                    headers[header] = column
+            sequence_column = headers.get("序号")
+            guarantor_column = headers.get("保证人")
+            if not sequence_column:
+                raise ValueError("Excel 中未找到“序号”列")
+            if not guarantor_column:
+                return []
+            guarantors: list[str] = []
+            for row in range(2, sheet.max_row + 1):
+                sequence = sheet.cell(row, sequence_column).value
+                if sequence is None or not str(sequence).strip():
+                    continue
+                value = sheet.cell(row, guarantor_column).value
+                guarantor = str(value or "").strip()
+                if guarantor and guarantor not in guarantors:
+                    guarantors.append(guarantor)
+            return guarantors
+        finally:
+            workbook.close()
+
+    def _format_saved_guarantor(self, details: dict) -> str:
+        fields = (
+            "保证人",
+            "统一社会信用代码",
+            "类型",
+            "法定代表人",
+            "成立日期",
+            "营业场所",
+            "经营范围",
+        )
+        return "\n".join(
+            f"{field}：{details.get(field, '')}"
+            for field in fields
+            if details.get(field)
+        )
+
+    def _has_complete_guarantor(self, details: dict) -> bool:
+        return all(
+            str(details.get(field, "")).strip()
+            for field in (
+                "保证人",
+                "统一社会信用代码",
+                "类型",
+                "法定代表人",
+                "成立日期",
+                "营业场所",
+                "经营范围",
+            )
+        )
+
+    def _copy_guarantor_name(self) -> None:
+        self.root.clipboard_clear()
+        self.root.clipboard_append(self.current_guarantor)
+        self.root.update()
+        self.guarantor_status_var.set("保证人名称已复制")
+
+    def _show_next_guarantor_dialog(self) -> None:
+        if not self.pending_guarantors:
+            self._launch_generation()
+            return
+        self.current_guarantor = self.pending_guarantors.pop(0)
+        rules = self._load_rules()
+        saved_details = rules.get("guarantors", {}).get(self.current_guarantor, {})
+
+        dialog = tk.Toplevel(self.root)
+        self.guarantor_dialog = dialog
+        dialog.title("保证人资料")
+        dialog.geometry("840x650")
+        dialog.minsize(720, 560)
+        dialog.configure(bg=WINDOW_BG)
+        dialog.transient(self.root)
+        dialog.grab_set()
+        dialog.columnconfigure(0, weight=1)
+        dialog.rowconfigure(2, weight=1)
+        dialog.protocol("WM_DELETE_WINDOW", self._cancel_guarantor_workflow)
+
+        name_panel = tk.Frame(
+            dialog,
+            bg=PANEL_BG,
+            highlightbackground=BORDER,
+            highlightthickness=1,
+            padx=18,
+            pady=14,
+        )
+        name_panel.grid(row=0, column=0, sticky="ew", padx=22, pady=(22, 12))
+        name_panel.columnconfigure(1, weight=1)
+        tk.Label(
+            name_panel,
+            text="保证人",
+            font=("Microsoft YaHei UI", 10, "bold"),
+            bg=PANEL_BG,
+            fg=TEXT_DARK,
+        ).grid(row=0, column=0, sticky="w")
+        name_var = tk.StringVar(value=self.current_guarantor)
+        name_entry = tk.Entry(
+            name_panel,
+            textvariable=name_var,
+            state="readonly",
+            readonlybackground=INPUT_BG,
+            fg=TEXT_DARK,
+            font=("Microsoft YaHei UI", 11),
+            relief="solid",
+            bd=1,
+        )
+        name_entry.grid(row=0, column=1, sticky="ew", padx=(14, 10), ipady=7)
+        self.copy_guarantor_button = self._button(
+            name_panel,
+            "复制",
+            self._copy_guarantor_name,
+            GREEN,
+            GREEN_ACTIVE,
+            padx=14,
+            pady=7,
+        )
+        self.copy_guarantor_button.grid(row=0, column=2)
+
+        tk.Label(
+            dialog,
+            text="粘贴保证人企业资料",
+            font=("Microsoft YaHei UI", 11, "bold"),
+            bg=WINDOW_BG,
+            fg=TEXT_DARK,
+            anchor="w",
+        ).grid(row=1, column=0, sticky="ew", padx=22, pady=(0, 8))
+
+        text_panel = tk.Frame(
+            dialog,
+            bg=PANEL_BG,
+            highlightbackground=BORDER,
+            highlightthickness=1,
+        )
+        text_panel.grid(row=2, column=0, sticky="nsew", padx=22)
+        text_panel.columnconfigure(0, weight=1)
+        text_panel.rowconfigure(0, weight=1)
+        self.guarantor_source_text = tk.Text(
+            text_panel,
+            wrap="word",
+            font=("Microsoft YaHei UI", 10),
+            bg=INPUT_BG,
+            fg=TEXT_DARK,
+            insertbackground=TEXT_DARK,
+            relief="flat",
+            padx=12,
+            pady=10,
+            undo=True,
+        )
+        self.guarantor_source_text.grid(row=0, column=0, sticky="nsew")
+        text_scrollbar = tk.Scrollbar(
+            text_panel,
+            command=self.guarantor_source_text.yview,
+        )
+        text_scrollbar.grid(row=0, column=1, sticky="ns")
+        self.guarantor_source_text.configure(yscrollcommand=text_scrollbar.set)
+        if saved_details:
+            self.guarantor_source_text.insert(
+                "1.0",
+                self._format_saved_guarantor(saved_details),
+            )
+
+        footer = tk.Frame(dialog, bg=WINDOW_BG)
+        footer.grid(row=3, column=0, sticky="ew", padx=22, pady=18)
+        footer.columnconfigure(0, weight=1)
+        tk.Label(
+            footer,
+            textvariable=self.guarantor_status_var,
+            font=("Microsoft YaHei UI", 9),
+            bg=WINDOW_BG,
+            fg=TEXT_MID,
+            anchor="w",
+        ).grid(row=0, column=0, sticky="ew")
+        self.cancel_guarantor_button = self._button(
+            footer,
+            "取消生成",
+            self._cancel_guarantor_workflow,
+            GRAY_BUTTON,
+            GRAY_ACTIVE,
+            padx=14,
+            pady=8,
+        )
+        self.cancel_guarantor_button.grid(row=0, column=1, padx=(10, 0))
+        self.use_saved_button = self._button(
+            footer,
+            "使用已保存信息",
+            self._use_saved_guarantor,
+            GRAY_BUTTON,
+            GRAY_ACTIVE,
+            padx=14,
+            pady=8,
+        )
+        self.use_saved_button.grid(row=0, column=2, padx=(10, 0))
+        if not self._has_complete_guarantor(saved_details):
+            self.use_saved_button.configure(state="disabled")
+        self.extract_guarantor_button = self._button(
+            footer,
+            "提取并保存",
+            self._start_guarantor_extraction,
+            RUST,
+            RUST_ACTIVE,
+            padx=18,
+            pady=8,
+        )
+        self.extract_guarantor_button.grid(row=0, column=3, padx=(10, 0))
+
+        if self._has_complete_guarantor(saved_details):
+            status_text = "已载入完整的保存信息，可直接使用"
+        elif saved_details:
+            status_text = "保存的信息不完整，请补充资料后重新提取"
+        else:
+            status_text = "请粘贴查询到的企业资料"
+        self.guarantor_status_var.set(status_text)
+        self.guarantor_source_text.focus_set()
+
+    def _set_guarantor_dialog_state(self, busy: bool) -> None:
+        self.extraction_in_progress = busy
+        state = "disabled" if busy else "normal"
+        if self.guarantor_source_text is not None:
+            self.guarantor_source_text.configure(state=state)
+        for button_name in (
+            "copy_guarantor_button",
+            "cancel_guarantor_button",
+            "extract_guarantor_button",
+        ):
+            button = getattr(self, button_name, None)
+            if button is not None:
+                button.configure(state=state)
+        if getattr(self, "use_saved_button", None) is not None:
+            rules = self._load_rules()
+            has_saved = self._has_complete_guarantor(
+                rules.get("guarantors", {}).get(self.current_guarantor, {})
+            )
+            self.use_saved_button.configure(
+                state="disabled" if busy or not has_saved else "normal"
+            )
+
+    def _start_guarantor_extraction(self) -> None:
+        if self.extraction_in_progress or self.guarantor_source_text is None:
+            return
+        source_text = self.guarantor_source_text.get("1.0", tk.END).strip()
+        if not source_text:
+            messagebox.showerror(
+                "缺少资料",
+                "请先把查询到的保证人企业资料粘贴到大文字框中。",
+                parent=self.guarantor_dialog,
+            )
+            return
+        self._set_guarantor_dialog_state(True)
+        self.guarantor_status_var.set("Gemini 正在提取字段...")
+        api_key = self.api_key_var.get().strip()
+        model = self.model_var.get()
+        guarantor = self.current_guarantor
+        rules = self._load_rules()
+        ai_config = rules.get("ai", {})
+        thinking_level = str(ai_config.get("thinking_level") or "medium")
+        store_interactions = bool(ai_config.get("store_interactions", False))
+        worker = threading.Thread(
+            target=self._guarantor_extraction_worker,
+            args=(
+                api_key,
+                model,
+                thinking_level,
+                guarantor,
+                source_text,
+                store_interactions,
+            ),
+            daemon=True,
+        )
+        worker.start()
+
+    def _guarantor_extraction_worker(
+        self,
+        api_key: str,
+        model: str,
+        thinking_level: str,
+        guarantor: str,
+        source_text: str,
+        store_interactions: bool,
+    ) -> None:
+        try:
+            audit = extract_guarantor_details_from_text(
+                client=create_gemini_client(api_key),
+                model=model,
+                thinking_level=thinking_level,
+                guarantor_name=guarantor,
+                source_text=source_text,
+                store_interactions=store_interactions,
+            )
+            self.root.after(0, self._finish_guarantor_extraction, audit)
+        except Exception as exc:
+            self.root.after(0, self._fail_guarantor_extraction, str(exc))
+
+    def _finish_guarantor_extraction(self, audit: object) -> None:
+        self._set_guarantor_dialog_state(False)
+        if audit.warnings:
+            self.guarantor_status_var.set(audit.warnings[0])
+            messagebox.showwarning(
+                "资料不完整",
+                audit.warnings[0] + "\n\n请补充原始资料后重新提取。",
+                parent=self.guarantor_dialog,
+            )
+            return
+        details = {
+            field: audit.guarantor_details.get(field, "")
+            for field in (
+                "保证人",
+                "统一社会信用代码",
+                "类型",
+                "法定代表人",
+                "成立日期",
+                "营业场所",
+                "经营范围",
+            )
+        }
+        rules = self._load_rules()
+        rules.setdefault("guarantors", {})[self.current_guarantor] = details
+        try:
+            self._save_rules(rules)
+        except OSError as exc:
+            self._fail_guarantor_extraction(f"写入规则 JSON 失败: {exc}")
+            return
+        interaction_note = (
+            f" | Gemini interaction: {audit.interaction_id}"
+            if audit.interaction_id
+            else ""
+        )
+        self._append_log(
+            f"已保存保证人资料：{self.current_guarantor}{interaction_note}"
+        )
+        self._complete_current_guarantor()
+
+    def _fail_guarantor_extraction(self, error: str) -> None:
+        self._set_guarantor_dialog_state(False)
+        self.guarantor_status_var.set("提取失败")
+        messagebox.showerror(
+            "提取失败",
+            error,
+            parent=self.guarantor_dialog,
+        )
+
+    def _use_saved_guarantor(self) -> None:
+        if self.extraction_in_progress:
+            return
+        self._append_log(f"使用已保存保证人资料：{self.current_guarantor}")
+        self._complete_current_guarantor()
+
+    def _complete_current_guarantor(self) -> None:
+        if self.guarantor_dialog is not None:
+            self.guarantor_dialog.grab_release()
+            self.guarantor_dialog.destroy()
+        self.guarantor_dialog = None
+        self.guarantor_source_text = None
+        self.current_guarantor = ""
+        self.root.after(0, self._show_next_guarantor_dialog)
+
+    def _cancel_guarantor_workflow(self) -> None:
+        if self.extraction_in_progress:
+            return
+        if self.guarantor_dialog is not None:
+            self.guarantor_dialog.grab_release()
+            self.guarantor_dialog.destroy()
+        self.guarantor_dialog = None
+        self.guarantor_source_text = None
+        self.pending_guarantors.clear()
+        self.current_guarantor = ""
+        self.processing = False
+        self.status_var.set("已取消")
+        self._refresh_state()
+        self._append_log("已取消生成。")
+
     def _refresh_state(self) -> None:
         state = "disabled" if self.processing else "normal"
         for entry in self._path_entries:
@@ -524,8 +952,28 @@ class ReportGeneratorApp:
             return
 
         self.processing = True
-        self.status_var.set("正在生成")
+        self.status_var.set("正在识别保证人")
         self._refresh_state()
+        try:
+            self.pending_guarantors = self._find_guarantors()
+        except Exception as exc:
+            self.processing = False
+            self.status_var.set("读取 Excel 失败")
+            self._refresh_state()
+            messagebox.showerror("读取 Excel 失败", str(exc))
+            return
+        if self.pending_guarantors:
+            self._append_log(
+                f"识别到 {len(self.pending_guarantors)} 个唯一保证人，"
+                "请逐一确认资料。"
+            )
+            self.status_var.set("等待保证人资料")
+            self._show_next_guarantor_dialog()
+            return
+        self._launch_generation()
+
+    def _launch_generation(self) -> None:
+        self.status_var.set("正在生成")
         self._append_log("开始生成文档...")
         command, environment = self._build_process_command()
         worker = threading.Thread(
@@ -558,6 +1006,7 @@ class ReportGeneratorApp:
             self.document_type_var.get(),
             "--model",
             self.model_var.get(),
+            "--skip-gemini",
             "--api-key-file",
             str(API_KEY_FILE),
         ]

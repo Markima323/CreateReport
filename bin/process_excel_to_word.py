@@ -656,6 +656,28 @@ def get_excel_guarantor_details(values: Dict[str, Any]) -> Dict[str, Any]:
     return details
 
 
+def validate_guarantor_details(
+    guarantor_name: str,
+    details: Dict[str, Any],
+) -> None:
+    if not guarantor_name:
+        return
+    required_fields = (
+        "统一社会信用代码",
+        "类型",
+        "法定代表人",
+        "成立日期",
+        "营业场所",
+        "经营范围",
+    )
+    missing = [field for field in required_fields if not clean_text(details.get(field))]
+    if missing:
+        raise ValueError(
+            f"保证人“{guarantor_name}”资料不完整，缺少: {', '.join(missing)}。"
+            "请通过生成面板粘贴企业资料并使用 Gemini 提取保存。"
+        )
+
+
 def merge_gemini_guarantor_details(
     report: PreparedReport,
     excel_details: Dict[str, Any],
@@ -719,6 +741,28 @@ GEMINI_RESPONSE_SCHEMA: Dict[str, Any] = {
     "required": ["warnings", "guarantor"],
 }
 
+GUARANTOR_EXTRACTION_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "guarantor": {"type": "string"},
+        "unified_social_credit_code": {"type": "string"},
+        "company_type": {"type": "string"},
+        "legal_representative": {"type": "string"},
+        "establishment_date": {"type": "string"},
+        "business_address": {"type": "string"},
+        "business_scope": {"type": "string"},
+    },
+    "required": [
+        "guarantor",
+        "unified_social_credit_code",
+        "company_type",
+        "legal_representative",
+        "establishment_date",
+        "business_address",
+        "business_scope",
+    ],
+}
+
 
 class GeminiInteractionsClient:
     endpoint = "https://generativelanguage.googleapis.com/v1beta/interactions"
@@ -761,6 +805,106 @@ class GeminiInteractionsClient:
 
 def create_gemini_client(api_key: str) -> GeminiInteractionsClient:
     return GeminiInteractionsClient(api_key=api_key)
+
+
+def get_interaction_output_text(interaction: Dict[str, Any]) -> str:
+    output_text = clean_text(interaction.get("output_text"))
+    if output_text:
+        return output_text
+    text_blocks: List[str] = []
+    for step in interaction.get("steps", []):
+        if step.get("type") != "model_output":
+            continue
+        for content in step.get("content", []):
+            if content.get("type") == "text" and content.get("text"):
+                text_blocks.append(str(content["text"]))
+    return "".join(text_blocks).strip()
+
+
+def extract_guarantor_details_from_text(
+    client: Any,
+    model: str,
+    thinking_level: str,
+    guarantor_name: str,
+    source_text: str,
+    store_interactions: bool = False,
+) -> GeminiAudit:
+    guarantor_name = clean_text(guarantor_name)
+    source_text = clean_text(source_text)
+    if not guarantor_name:
+        raise ValueError("保证人名称为空")
+    if not source_text:
+        raise ValueError("请先粘贴保证人资料")
+
+    prompt = (
+        "你是企业登记信息提取器。请只从用户粘贴的原始资料中提取字段，"
+        "不得联网搜索，不得使用常识补全，不得改写公司名称。"
+        "无法从原文确定的字段返回空字符串。经营范围应完整保留原文内容，"
+        "删除网页菜单、广告、页脚和与目标公司无关的内容。\n\n"
+        f"目标保证人：{guarantor_name}\n\n"
+        "原始资料：\n"
+        f"{source_text}"
+    )
+    interaction = client.create(
+        model=model,
+        input=prompt,
+        response_format={
+            "type": "text",
+            "mime_type": "application/json",
+            "schema": GUARANTOR_EXTRACTION_SCHEMA,
+        },
+        generation_config={"thinking_level": thinking_level},
+        store=store_interactions,
+    )
+    if interaction.get("status") == "failed":
+        raise RuntimeError(
+            f"Gemini interaction 失败: {interaction.get('error') or interaction}"
+        )
+    output_text = get_interaction_output_text(interaction)
+    if not output_text:
+        raise RuntimeError("Gemini 返回了空响应")
+    try:
+        payload = json.loads(output_text)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"Gemini 返回的结构化 JSON 无法解析: {exc}") from exc
+
+    returned_name = clean_text(payload.get("guarantor"))
+    if returned_name != guarantor_name:
+        raise ValueError(
+            f"Gemini 提取的保证人名称不一致: 目标={guarantor_name}, "
+            f"返回={returned_name or '空'}"
+        )
+    details = {
+        "保证人": guarantor_name,
+        "统一社会信用代码": clean_text(payload.get("unified_social_credit_code")),
+        "类型": clean_text(payload.get("company_type")),
+        "法定代表人": clean_text(payload.get("legal_representative")),
+        "成立日期": clean_text(payload.get("establishment_date")),
+        "营业场所": clean_text(payload.get("business_address")),
+        "经营范围": clean_text(payload.get("business_scope")),
+    }
+    missing = [
+        field
+        for field in (
+            "统一社会信用代码",
+            "类型",
+            "法定代表人",
+            "成立日期",
+            "营业场所",
+            "经营范围",
+        )
+        if not details[field]
+    ]
+    warnings = [f"原始资料中未提取到: {', '.join(missing)}"] if missing else []
+    usage = interaction.get("usage") if isinstance(interaction.get("usage"), dict) else {}
+    return GeminiAudit(
+        interaction_id=clean_text(interaction.get("id")),
+        model=clean_text(interaction.get("model")) or model,
+        warnings=warnings,
+        guarantor_details=details,
+        sources=[],
+        usage=usage,
+    )
 
 
 def build_gemini_input(
@@ -825,16 +969,7 @@ def call_gemini(
         raise RuntimeError(
             f"Gemini interaction 失败: {interaction.get('error') or interaction}"
         )
-    output_text = clean_text(interaction.get("output_text"))
-    if not output_text:
-        text_blocks: List[str] = []
-        for step in interaction.get("steps", []):
-            if step.get("type") != "model_output":
-                continue
-            for content in step.get("content", []):
-                if content.get("type") == "text" and content.get("text"):
-                    text_blocks.append(str(content["text"]))
-        output_text = "".join(text_blocks).strip()
+    output_text = get_interaction_output_text(interaction)
     if not output_text:
         raise RuntimeError("Gemini 返回了空响应")
     try:
@@ -1287,7 +1422,12 @@ def build_parser(project_root: Path) -> argparse.ArgumentParser:
     parser.add_argument(
         "--skip-gemini",
         action="store_true",
-        help="Developer/test option: generate locally without making Gemini API calls.",
+        help="Compatibility flag: do not run the optional per-row Gemini audit.",
+    )
+    parser.add_argument(
+        "--use-gemini-audit",
+        action="store_true",
+        help="Optional: run the legacy per-row Gemini audit after GUI guarantor extraction.",
     )
     parser.add_argument(
         "--no-word-field-update",
@@ -1329,10 +1469,12 @@ def main() -> int:
     ai_config = rules.get("ai", {})
     model = clean_text(args.model) or clean_text(ai_config.get("model")) or DEFAULT_GEMINI_MODEL
     thinking_level = clean_text(ai_config.get("thinking_level")) or "medium"
-    use_google_search = bool(ai_config.get("use_google_search_for_guarantor", True))
+    use_google_search = bool(ai_config.get("use_google_search_for_guarantor", False))
     store_interactions = bool(ai_config.get("store_interactions", False))
+    saved_guarantors = rules.get("guarantors", {})
+    gemini_enabled = bool(args.use_gemini_audit and not args.skip_gemini)
     gemini_client = None
-    if not args.skip_gemini:
+    if gemini_enabled:
         gemini_client = create_gemini_client(load_gemini_api_key(api_key_file))
 
     workbook = openpyxl.load_workbook(workbook_file, data_only=True)
@@ -1356,7 +1498,7 @@ def main() -> int:
             "provider": "Google Gemini",
             "model": model,
             "api": "Interactions API",
-            "enabled": not args.skip_gemini,
+            "enabled": gemini_enabled,
             "store_interactions": store_interactions,
         },
         "template_field_counts": template_field_counts,
@@ -1371,7 +1513,7 @@ def main() -> int:
     print(f"Using workbook: {workbook_file}")
     print(f"Document type: {args.document_type}")
     print(
-        f"AI: {'disabled by --skip-gemini' if args.skip_gemini else f'Google Gemini / {model} / Interactions API'}"
+        f"AI audit: {'disabled' if not gemini_enabled else f'Google Gemini / {model} / Interactions API'}"
     )
 
     for row_number in range(2, ws.max_row + 1):
@@ -1383,12 +1525,22 @@ def main() -> int:
         name = clean_text(values.get("姓名"))
         print(f"Processing row {row_number} | 序号 {sequence} | {name}")
         try:
+            guarantor_name = clean_text(values.get("保证人"))
+            saved_guarantor_details = (
+                dict(saved_guarantors.get(guarantor_name, {}))
+                if guarantor_name
+                else {}
+            )
+            saved_guarantor_details.pop("保证人", None)
             excel_guarantor_details = get_excel_guarantor_details(values)
+            guarantor_details = dict(saved_guarantor_details)
+            guarantor_details.update(excel_guarantor_details)
+            validate_guarantor_details(guarantor_name, guarantor_details)
             report = build_prepared_report(
                 row_number,
                 values,
                 project,
-                excel_guarantor_details,
+                guarantor_details,
             )
             audit: Optional[GeminiAudit] = None
             if gemini_client is not None:
@@ -1400,7 +1552,7 @@ def main() -> int:
                     prompt_text=prompt_text,
                     values=values,
                     report=report,
-                    excel_details=excel_guarantor_details,
+                    excel_details=guarantor_details,
                     use_google_search=use_google_search,
                     store_interactions=store_interactions,
                 )
