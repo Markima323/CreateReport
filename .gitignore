@@ -1,4 +1,5 @@
 api.txt
+gemini_api.txt
 *.key
 *.pem
 *.p12
@@ -13,5 +14,7 @@ __pycache__/
 *.py[cod]
 
 word/
+error.log
 ~$*.docx
 ~$*.docm
+~$*.xlsx

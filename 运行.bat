@@ -36,14 +36,6 @@ if errorlevel 1 (
     exit /b 1
 )
 
-echo [3/3] Running Excel template -> Word report pipeline...
-%PY_CMD% "bin\process_excel_to_word.py"
-if errorlevel 1 (
-    echo [ERROR] Pipeline failed. Check the error messages above.
-    pause
-    exit /b 1
-)
-
-echo Completed. Word reports are in the "word" folder.
-pause
+echo [3/3] Opening report generator panel...
+start "" "%VENV_DIR%\Scripts\pythonw.exe" "bin\report_generator_gui.pyw"
 exit /b 0

@@ -13,10 +13,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import shutil
 import sys
 import tempfile
+import time
+import urllib.error
+import urllib.request
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -59,6 +63,7 @@ DEFAULT_PROJECT_VALUES: Dict[str, Any] = {
     "折现率": 0.03,
 }
 
+DEFAULT_GEMINI_MODEL = "gemini-3.5-flash"
 MONEY_TOLERANCE = Decimal("1")
 COEFFICIENT_TOLERANCE = Decimal("0.0001")
 PERCENT_RATIO_TOLERANCE = Decimal("0.0001")
@@ -93,6 +98,15 @@ FIELD_COLUMNS: Dict[str, int] = {
     "权证编号": 29,
     "证载权利人": 30,
     "保证人": 51,
+}
+
+OPTIONAL_GUARANTOR_COLUMNS: Dict[str, str] = {
+    "保证人统一社会信用代码": "统一社会信用代码",
+    "保证人类型": "类型",
+    "保证人法定代表人": "法定代表人",
+    "保证人成立日期": "成立日期",
+    "保证人营业场所": "营业场所",
+    "保证人经营范围": "经营范围",
 }
 
 DEBTOR_COLUMNS: List[Tuple[str, int, int, int, int, int]] = [
@@ -132,6 +146,16 @@ class PreparedReport:
     conclusion_text: str
     guarantor_extra_lines: List[str]
     warnings: List[str]
+
+
+@dataclass
+class GeminiAudit:
+    interaction_id: str
+    model: str
+    warnings: List[str]
+    guarantor_details: Dict[str, Any]
+    sources: List[str]
+    usage: Dict[str, Any]
 
 
 def is_blank(value: Any) -> bool:
@@ -289,7 +313,24 @@ def choose_cached_or_computed(
     return cached
 
 
-def get_row_values(ws: Any, row_number: int) -> Dict[str, Any]:
+def normalize_header(value: Any) -> str:
+    return re.sub(r"\s+", "", clean_text(value))
+
+
+def build_header_columns(ws: Any) -> Dict[str, int]:
+    columns: Dict[str, int] = {}
+    for col in range(1, ws.max_column + 1):
+        header = normalize_header(ws.cell(1, col).value)
+        if header:
+            columns[header] = col
+    return columns
+
+
+def get_row_values(
+    ws: Any,
+    row_number: int,
+    header_columns: Optional[Dict[str, int]] = None,
+) -> Dict[str, Any]:
     values: Dict[str, Any] = {}
     for field, col in FIELD_COLUMNS.items():
         values[field] = ws.cell(row_number, col).value
@@ -299,6 +340,9 @@ def get_row_values(ws: Any, row_number: int) -> Dict[str, Any]:
         values[f"债务人{i}民族"] = ws.cell(row_number, ethnicity_col).value
         values[f"债务人{i}身份证号码"] = ws.cell(row_number, id_col).value
         values[f"债务人{i}住址"] = ws.cell(row_number, addr_col).value
+    for header in OPTIONAL_GUARANTOR_COLUMNS:
+        col = (header_columns or {}).get(normalize_header(header))
+        values[header] = ws.cell(row_number, col).value if col else None
     return values
 
 
@@ -353,7 +397,7 @@ def build_prepared_report(
     row_number: int,
     values: Dict[str, Any],
     project: Dict[str, Any],
-    known_guarantors: Dict[str, Dict[str, Any]],
+    guarantor_details: Optional[Dict[str, Any]] = None,
 ) -> PreparedReport:
     warnings: List[str] = []
     required = ["序号", "支行", "姓名", "地址", "面积", "权利价值", "预计回收", "评估单价", "权证编号", "证载权利人"]
@@ -504,7 +548,7 @@ def build_prepared_report(
         debtor_names_overview = f"{debtor_names_overview}，债务责任关联方为{guarantor}"
     debtor_names_table = "、".join(debtor.name for debtor in debtors)
 
-    guarantor_details = known_guarantors.get(guarantor, {}) if guarantor else {}
+    guarantor_details = guarantor_details or {}
     guarantor_extra_lines = [
         clean_text(line) for line in guarantor_details.get("经营范围附加行", []) if clean_text(line)
     ]
@@ -603,6 +647,260 @@ def build_prepared_report(
     )
 
 
+def get_excel_guarantor_details(values: Dict[str, Any]) -> Dict[str, Any]:
+    details: Dict[str, Any] = {}
+    for header, detail_key in OPTIONAL_GUARANTOR_COLUMNS.items():
+        value = clean_text(values.get(header))
+        if value:
+            details[detail_key] = value
+    return details
+
+
+def merge_gemini_guarantor_details(
+    report: PreparedReport,
+    excel_details: Dict[str, Any],
+    audit: GeminiAudit,
+) -> None:
+    merged = dict(audit.guarantor_details)
+    merged.update(excel_details)
+    replacement_keys = {
+        "统一社会信用代码": "保证人统一社会信用代码",
+        "类型": "保证人类型",
+        "法定代表人": "保证人法定代表人",
+        "成立日期": "保证人成立日期",
+        "营业场所": "保证人营业场所",
+        "经营范围": "保证人经营范围",
+    }
+    for detail_key, replacement_key in replacement_keys.items():
+        report.replacements[replacement_key] = clean_text(merged.get(detail_key))
+    report.guarantor_extra_lines = [
+        clean_text(line)
+        for line in merged.get("经营范围附加行", [])
+        if clean_text(line)
+    ]
+    report.warnings.extend(f"Gemini: {warning}" for warning in audit.warnings if clean_text(warning))
+
+
+GEMINI_RESPONSE_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "warnings": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Only concrete conflicts or risks found in the supplied generation plan.",
+        },
+        "guarantor": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "unified_social_credit_code": {"type": "string"},
+                "company_type": {"type": "string"},
+                "legal_representative": {"type": "string"},
+                "establishment_date": {"type": "string"},
+                "business_address": {"type": "string"},
+                "business_scope": {"type": "string"},
+                "business_scope_extra_lines": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                },
+            },
+            "required": [
+                "name",
+                "unified_social_credit_code",
+                "company_type",
+                "legal_representative",
+                "establishment_date",
+                "business_address",
+                "business_scope",
+                "business_scope_extra_lines",
+            ],
+        },
+    },
+    "required": ["warnings", "guarantor"],
+}
+
+
+class GeminiInteractionsClient:
+    endpoint = "https://generativelanguage.googleapis.com/v1beta/interactions"
+
+    def __init__(self, api_key: str, timeout_seconds: int = 180) -> None:
+        self.api_key = api_key
+        self.timeout_seconds = timeout_seconds
+
+    def create(self, **payload: Any) -> Dict[str, Any]:
+        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        for attempt in range(3):
+            request = urllib.request.Request(
+                self.endpoint,
+                data=data,
+                headers={
+                    "Content-Type": "application/json; charset=utf-8",
+                    "x-goog-api-key": self.api_key,
+                },
+                method="POST",
+            )
+            try:
+                with urllib.request.urlopen(
+                    request,
+                    timeout=self.timeout_seconds,
+                ) as response:
+                    return json.loads(response.read().decode("utf-8"))
+            except urllib.error.HTTPError as exc:
+                if exc.code in {429, 500, 502, 503, 504} and attempt < 2:
+                    time.sleep(2**attempt)
+                    continue
+                body = exc.read().decode("utf-8", errors="replace")
+                raise RuntimeError(f"Gemini API HTTP {exc.code}: {body}") from exc
+            except urllib.error.URLError as exc:
+                if attempt < 2:
+                    time.sleep(2**attempt)
+                    continue
+                raise RuntimeError(f"无法连接 Gemini API: {exc.reason}") from exc
+        raise RuntimeError("Gemini API 调用失败")
+
+
+def create_gemini_client(api_key: str) -> GeminiInteractionsClient:
+    return GeminiInteractionsClient(api_key=api_key)
+
+
+def build_gemini_input(
+    prompt_text: str,
+    values: Dict[str, Any],
+    report: PreparedReport,
+    excel_details: Dict[str, Any],
+) -> str:
+    review_payload = {
+        "document_type": "1",
+        "row_number": report.row_number,
+        "sequence": report.sequence,
+        "calculation_plan": {
+            "placement_cost_included": report.placement_cost_included,
+            "minimum_item": report.minimum_item,
+            "debtor_count": report.debtor_count,
+            "guarantor_included": report.guarantor_included,
+            "property_nature": clean_text(values.get("性质")),
+            "expected_recovery_period": clean_text(values.get("预计回收")),
+        },
+        "guarantor_name": clean_text(values.get("保证人")),
+        "excel_guarantor_details": excel_details,
+    }
+    return (
+        f"{prompt_text}\n\n"
+        "## 本次 Gemini 任务\n"
+        "你只负责审核下面这条本地生成计划，并在保证人非空时核验 Excel 未提供的企业信息。"
+        "不要输出报告正文，不要改写金额，不要推断债务人个人信息。"
+        "Excel 已提供的保证人字段具有最高优先级，返回时必须原样保留；"
+        "未能从可靠网页核验的字段返回空字符串。"
+        "如果保证人为空，guarantor 的所有字段均返回空值。\n\n"
+        + json.dumps(review_payload, ensure_ascii=False, indent=2, default=str)
+    )
+
+
+def call_gemini(
+    client: Any,
+    model: str,
+    thinking_level: str,
+    prompt_text: str,
+    values: Dict[str, Any],
+    report: PreparedReport,
+    excel_details: Dict[str, Any],
+    use_google_search: bool,
+    store_interactions: bool,
+) -> GeminiAudit:
+    kwargs: Dict[str, Any] = {
+        "model": model,
+        "input": build_gemini_input(prompt_text, values, report, excel_details),
+        "response_format": {
+            "type": "text",
+            "mime_type": "application/json",
+            "schema": GEMINI_RESPONSE_SCHEMA,
+        },
+        "generation_config": {"thinking_level": thinking_level},
+        "store": store_interactions,
+    }
+    if report.guarantor_included and use_google_search:
+        kwargs["tools"] = [{"type": "google_search"}]
+    interaction = client.create(**kwargs)
+    if interaction.get("status") == "failed":
+        raise RuntimeError(
+            f"Gemini interaction 失败: {interaction.get('error') or interaction}"
+        )
+    output_text = clean_text(interaction.get("output_text"))
+    if not output_text:
+        text_blocks: List[str] = []
+        for step in interaction.get("steps", []):
+            if step.get("type") != "model_output":
+                continue
+            for content in step.get("content", []):
+                if content.get("type") == "text" and content.get("text"):
+                    text_blocks.append(str(content["text"]))
+        output_text = "".join(text_blocks).strip()
+    if not output_text:
+        raise RuntimeError("Gemini 返回了空响应")
+    try:
+        payload = json.loads(output_text)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"Gemini 返回的结构化 JSON 无法解析: {exc}") from exc
+
+    guarantor = payload.get("guarantor") or {}
+    details: Dict[str, Any] = {
+        "统一社会信用代码": clean_text(guarantor.get("unified_social_credit_code")),
+        "类型": clean_text(guarantor.get("company_type")),
+        "法定代表人": clean_text(guarantor.get("legal_representative")),
+        "成立日期": clean_text(guarantor.get("establishment_date")),
+        "营业场所": clean_text(guarantor.get("business_address")),
+        "经营范围": clean_text(guarantor.get("business_scope")),
+        "经营范围附加行": [
+            clean_text(line)
+            for line in guarantor.get("business_scope_extra_lines", [])
+            if clean_text(line)
+        ],
+    }
+    sources: List[str] = []
+    for step in interaction.get("steps", []):
+        if step.get("type") != "model_output":
+            continue
+        for content in step.get("content", []):
+            if content.get("type") != "text":
+                continue
+            for annotation in content.get("annotations", []):
+                if annotation.get("type") != "url_citation":
+                    continue
+                url = clean_text(annotation.get("url"))
+                if url.lower().startswith(("https://", "http://")) and url not in sources:
+                    sources.append(url)
+    warnings = [
+        clean_text(warning)
+        for warning in payload.get("warnings", [])
+        if clean_text(warning)
+    ]
+    expected_guarantor = clean_text(values.get("保证人"))
+    returned_guarantor = clean_text(guarantor.get("name"))
+    if expected_guarantor and returned_guarantor != expected_guarantor:
+        warnings.append(
+            f"保证人名称未精确匹配，已拒绝 Gemini 企业信息: "
+            f"Excel={expected_guarantor}, Gemini={returned_guarantor or '空'}"
+        )
+        details = {}
+        sources = []
+    elif expected_guarantor and any(
+        clean_text(value)
+        for key, value in details.items()
+        if key != "经营范围附加行"
+    ) and not sources:
+        warnings.append("Gemini 未提供可核验来源网址，已拒绝其保证人企业信息")
+        details = {}
+    usage = interaction.get("usage") if isinstance(interaction.get("usage"), dict) else {}
+    return GeminiAudit(
+        interaction_id=clean_text(interaction.get("id")),
+        model=clean_text(interaction.get("model")) or model,
+        warnings=warnings,
+        guarantor_details=details,
+        sources=sources,
+        usage=usage,
+    )
+
+
 def remove_paragraph(paragraph: Any) -> None:
     element = paragraph._element
     parent = element.getparent()
@@ -674,85 +972,6 @@ def apply_literal_adjustments(doc: Any, has_guarantor: bool) -> None:
         adjusted = adjusted.replace("等五个方面", "等四个方面")
         if adjusted != text:
             set_paragraph_text(paragraph, adjusted)
-
-
-def apply_static_toc(doc: Any, report: PreparedReport) -> None:
-    if report.guarantor_included:
-        toc_lines = {
-            "声": "声  明\t1",
-            "价值分析报告摘要": "价值分析报告摘要\t2",
-            "价值分析报告": "价值分析报告\t4",
-            "一、": "一、委托人、债务人及债务责任关联方简介\t4",
-            "二、": "二、价值分析目的\t5",
-            "三、": "三、价值分析对象和价值分析范围\t5",
-            "四、": "四、价值类型\t6",
-            "五、": "五、价值分析基准日\t6",
-            "六、": "六、价值分析思路和方法\t6",
-            "七、": "七、价值分析程序实施过程和情况\t9",
-            "八、": "八、价值分析假设\t11",
-            "九、": "九、价值分析结论\t11",
-            "十、": "十、特别事项说明\t12",
-            "十一、": "十一、价值分析报告使用限制说明\t13",
-            "十二、": "十二、价值分析报告日\t13",
-            "十三、": "十三、资产评估机构印章\t14",
-            "价值分析报告附件": "价值分析报告附件\t15",
-        }
-    elif report.debtor_count == 1:
-        toc_lines = {
-            "声": "声  明\t1",
-            "价值分析报告摘要": "价值分析报告摘要\t2",
-            "价值分析报告": "价值分析报告\t4",
-            "一、": "一、委托人、债务人及债务责任关联方简介\t4",
-            "二、": "二、价值分析目的\t5",
-            "三、": "三、价值分析对象和价值分析范围\t5",
-            "四、": "四、价值类型\t5",
-            "五、": "五、价值分析基准日\t6",
-            "六、": "六、价值分析思路和方法\t6",
-            "七、": "七、价值分析程序实施过程和情况\t9",
-            "八、": "八、价值分析假设\t10",
-            "九、": "九、价值分析结论\t11",
-            "十、": "十、特别事项说明\t11",
-            "十一、": "十一、价值分析报告使用限制说明\t12",
-            "十二、": "十二、价值分析报告日\t13",
-            "十三、": "十三、资产评估机构印章\t13",
-            "价值分析报告附件": "价值分析报告附件\t14",
-        }
-    else:
-        toc_lines = {
-            "声": "声  明\t1",
-            "价值分析报告摘要": "价值分析报告摘要\t2",
-            "价值分析报告": "价值分析报告\t4",
-            "一、": "一、委托人、债务人及债务责任关联方简介\t4",
-            "二、": "二、价值分析目的\t5",
-            "三、": "三、价值分析对象和价值分析范围\t5",
-            "四、": "四、价值类型\t5",
-            "五、": "五、价值分析基准日\t6",
-            "六、": "六、价值分析思路和方法\t6",
-            "七、": "七、价值分析程序实施过程和情况\t9",
-            "八、": "八、价值分析假设\t10",
-            "九、": "九、价值分析结论\t11",
-            "十、": "十、特别事项说明\t12",
-            "十一、": "十一、价值分析报告使用限制说明\t13",
-            "十二、": "十二、价值分析报告日\t13",
-            "十三、": "十三、资产评估机构印章\t13",
-            "价值分析报告附件": "价值分析报告附件\t14",
-        }
-
-    in_toc = False
-    ordered_toc_lines = sorted(toc_lines.items(), key=lambda item: len(item[0]), reverse=True)
-    for paragraph in doc.paragraphs:
-        normalized = re.sub(r"\s+", "", paragraph.text)
-        if normalized == "目录":
-            in_toc = True
-            continue
-        if in_toc and normalized == "声明":
-            break
-        if not in_toc:
-            continue
-        for prefix, text in ordered_toc_lines:
-            if paragraph.text.strip().startswith(prefix):
-                set_paragraph_text(paragraph, text)
-                break
 
 
 def delete_optional_blocks(doc: Any, report: PreparedReport) -> None:
@@ -859,7 +1078,91 @@ def postprocess_docx_xml(path: Path, replacements: Dict[str, str]) -> None:
             temp_path.unlink()
 
 
-def scan_docx(path: Path) -> List[str]:
+def get_field_code_counts(path: Path) -> Dict[str, int]:
+    counts = {"fldChar": 0, "TOC": 0, "PAGEREF": 0, "PAGE": 0}
+    with ZipFile(path, "r") as zf:
+        for name in zf.namelist():
+            if not (name.startswith("word/") and name.endswith(".xml")):
+                continue
+            text = zf.read(name).decode("utf-8", errors="ignore")
+            counts["fldChar"] += len(re.findall(r"<w:fldChar\b", text))
+            for instruction in re.findall(
+                r"<w:instrText\b[^>]*>(.*?)</w:instrText>",
+                text,
+                flags=re.DOTALL,
+            ):
+                normalized = re.sub(r"<[^>]+>", "", instruction).strip().upper()
+                for field_name in ("TOC", "PAGEREF", "PAGE"):
+                    if re.match(rf"^{field_name}\b", normalized):
+                        counts[field_name] += 1
+    return counts
+
+
+def update_word_fields(path: Path) -> Optional[str]:
+    if not sys.platform.startswith("win"):
+        return "当前系统不是 Windows，已保留目录域，但未自动刷新目录页码"
+    try:
+        import pythoncom
+        import win32com.client
+    except Exception as exc:
+        return f"未安装或无法加载 Word 自动化组件，已保留目录域但未自动刷新: {exc}"
+
+    word = None
+    doc = None
+    pythoncom.CoInitialize()
+    try:
+        word = win32com.client.DispatchEx("Word.Application")
+        word.Visible = False
+        word.DisplayAlerts = 0
+        try:
+            word.AutomationSecurity = 3
+        except Exception:
+            pass
+        doc = word.Documents.Open(
+            str(path),
+            ConfirmConversions=False,
+            ReadOnly=False,
+            AddToRecentFiles=False,
+        )
+        for story_type in range(1, 18):
+            try:
+                story_range = doc.StoryRanges(story_type)
+            except Exception:
+                continue
+            while story_range is not None:
+                try:
+                    story_range.Fields.Update()
+                except Exception:
+                    pass
+                try:
+                    story_range = story_range.NextStoryRange
+                except Exception:
+                    story_range = None
+        for index in range(1, doc.TablesOfContents.Count + 1):
+            doc.TablesOfContents.Item(index).Update()
+        doc.Repaginate()
+        doc.Save()
+        return None
+    except Exception as exc:
+        return f"Word 后台更新目录/页码失败，域代码仍已保留: {exc}"
+    finally:
+        if doc is not None:
+            try:
+                doc.Close(SaveChanges=False)
+            except Exception:
+                pass
+        if word is not None:
+            try:
+                word.Quit()
+            except Exception:
+                pass
+        pythoncom.CoUninitialize()
+
+
+def scan_docx(
+    path: Path,
+    expected_field_counts: Optional[Dict[str, int]] = None,
+) -> List[str]:
     issues: List[str] = []
     try:
         Document(path)
@@ -874,20 +1177,42 @@ def scan_docx(path: Path) -> List[str]:
                 issues.append(f"{name} 中仍有占位符")
             if "<w:highlight" in text:
                 issues.append(f"{name} 中仍有高亮")
+            if "<w:updateFields" in text:
+                issues.append(f"{name} 中仍有自动更新域设置，Word 打开时可能弹出提示")
+    if expected_field_counts:
+        actual_counts = get_field_code_counts(path)
+        for field_name, expected in expected_field_counts.items():
+            actual = actual_counts.get(field_name, 0)
+            if actual < expected:
+                issues.append(
+                    f"Word 域代码数量减少: {field_name} 模板={expected}, 输出={actual}"
+                )
     return issues
 
 
-def render_report(template_file: Path, output_file: Path, report: PreparedReport) -> List[str]:
+def render_report(
+    template_file: Path,
+    output_file: Path,
+    report: PreparedReport,
+    expected_field_counts: Dict[str, int],
+    update_fields: bool,
+) -> List[str]:
     doc = Document(template_file)
     delete_optional_blocks(doc, report)
-    apply_static_toc(doc, report)
     replace_placeholders(doc, report)
     add_guarantor_extra_lines(doc, report)
     clear_highlights(doc)
     output_file.parent.mkdir(parents=True, exist_ok=True)
     doc.save(str(output_file))
     postprocess_docx_xml(output_file, report.replacements)
-    return scan_docx(output_file)
+    issues: List[str] = []
+    if update_fields:
+        field_update_warning = update_word_fields(output_file)
+        if field_update_warning:
+            issues.append(field_update_warning)
+        postprocess_docx_xml(output_file, report.replacements)
+    issues.extend(scan_docx(output_file, expected_field_counts))
+    return issues
 
 
 def find_single_file(directory: Path, pattern: str, description: str) -> Path:
@@ -920,6 +1245,29 @@ def load_project_values(rules: Dict[str, Any]) -> Dict[str, Any]:
     return project
 
 
+def load_gemini_api_key(api_key_file: Path) -> str:
+    environment_key = os.environ.get("GEMINI_API_KEY", "").strip()
+    if environment_key:
+        return environment_key
+    if api_key_file.is_file():
+        file_key = api_key_file.read_text(encoding="utf-8-sig").strip()
+        if file_key:
+            return file_key
+    raise ValueError(
+        "未找到 Gemini API Key。请在面板中填写，或设置 GEMINI_API_KEY，"
+        f"或写入本机文件: {api_key_file}"
+    )
+
+
+def validate_document_type(rules: Dict[str, Any], document_type: str) -> None:
+    config = rules.get("document_types", {}).get(document_type)
+    if not config:
+        raise ValueError(f"规则中未定义文档类型 {document_type}")
+    if not config.get("enabled"):
+        name = clean_text(config.get("name")) or "待配置"
+        raise ValueError(f"文档类型 {document_type}（{name}）尚未配置模板和生成规则")
+
+
 def build_parser(project_root: Path) -> argparse.ArgumentParser:
     defaults = resolve_defaults(project_root)
     parser = argparse.ArgumentParser(description="Generate one value-analysis Word report per Sheet1 data row.")
@@ -929,6 +1277,23 @@ def build_parser(project_root: Path) -> argparse.ArgumentParser:
     parser.add_argument("--workbook", default=str(defaults["workbook"]))
     parser.add_argument("--sheet", default="Sheet1")
     parser.add_argument("--word-dir", default=str(project_root / "word"))
+    parser.add_argument("--document-type", choices=["1", "2"], default="1")
+    parser.add_argument("--model", default=None)
+    parser.add_argument(
+        "--api-key-file",
+        default=str(project_root / "gemini_api.txt"),
+        help="Local ignored file containing the Gemini API key.",
+    )
+    parser.add_argument(
+        "--skip-gemini",
+        action="store_true",
+        help="Developer/test option: generate locally without making Gemini API calls.",
+    )
+    parser.add_argument(
+        "--no-word-field-update",
+        action="store_true",
+        help="Preserve Word fields but skip Microsoft Word COM field refresh.",
+    )
     return parser
 
 
@@ -941,6 +1306,7 @@ def main() -> int:
     rules_file = Path(args.rules_file).expanduser().resolve()
     workbook_file = Path(args.workbook).expanduser().resolve()
     word_dir = Path(args.word_dir).expanduser().resolve()
+    api_key_file = Path(args.api_key_file).expanduser().resolve()
 
     for label, path in [
         ("Word模板", template_file),
@@ -958,18 +1324,42 @@ def main() -> int:
         raise ValueError(f"Prompt文件为空: {prompt_file}")
 
     rules = load_rules(rules_file)
+    validate_document_type(rules, args.document_type)
     project = load_project_values(rules)
-    known_guarantors = rules.get("known_guarantors", {})
+    ai_config = rules.get("ai", {})
+    model = clean_text(args.model) or clean_text(ai_config.get("model")) or DEFAULT_GEMINI_MODEL
+    thinking_level = clean_text(ai_config.get("thinking_level")) or "medium"
+    use_google_search = bool(ai_config.get("use_google_search_for_guarantor", True))
+    store_interactions = bool(ai_config.get("store_interactions", False))
+    gemini_client = None
+    if not args.skip_gemini:
+        gemini_client = create_gemini_client(load_gemini_api_key(api_key_file))
+
     workbook = openpyxl.load_workbook(workbook_file, data_only=True)
     if args.sheet not in workbook.sheetnames:
         raise ValueError(f"Excel中不存在工作表 {args.sheet}; 可用工作表: {', '.join(workbook.sheetnames)}")
     ws = workbook[args.sheet]
+    header_columns = build_header_columns(ws)
+    template_field_counts = get_field_code_counts(template_file)
+    expected_field_counts = {
+        field_name: template_field_counts[field_name]
+        for field_name in ("TOC", "PAGEREF", "PAGE")
+    }
 
     manifest: Dict[str, Any] = {
+        "document_type": args.document_type,
         "template": str(template_file),
         "prompt": str(prompt_file),
         "workbook": str(workbook_file),
         "sheet": args.sheet,
+        "ai": {
+            "provider": "Google Gemini",
+            "model": model,
+            "api": "Interactions API",
+            "enabled": not args.skip_gemini,
+            "store_interactions": store_interactions,
+        },
+        "template_field_counts": template_field_counts,
         "reports": [],
         "errors": [],
     }
@@ -979,36 +1369,74 @@ def main() -> int:
     print(f"Using template: {template_file}")
     print(f"Using prompt: {prompt_file}")
     print(f"Using workbook: {workbook_file}")
+    print(f"Document type: {args.document_type}")
+    print(
+        f"AI: {'disabled by --skip-gemini' if args.skip_gemini else f'Google Gemini / {model} / Interactions API'}"
+    )
 
     for row_number in range(2, ws.max_row + 1):
         if is_blank(ws.cell(row_number, FIELD_COLUMNS["序号"]).value):
             continue
         total_records += 1
-        values = get_row_values(ws, row_number)
+        values = get_row_values(ws, row_number, header_columns)
         sequence = clean_text(values.get("序号"))
         name = clean_text(values.get("姓名"))
         print(f"Processing row {row_number} | 序号 {sequence} | {name}")
         try:
-            report = build_prepared_report(row_number, values, project, known_guarantors)
-            output_file = word_dir / report.filename
-            validation_issues = render_report(template_file, output_file, report)
-            all_warnings = report.warnings + validation_issues
-            manifest["reports"].append(
-                {
-                    "row_number": report.row_number,
-                    "sequence": report.sequence,
-                    "branch": report.branch,
-                    "name": report.name,
-                    "filename": report.filename,
-                    "report_number": report.report_number,
-                    "debtor_count": report.debtor_count,
-                    "guarantor_included": report.guarantor_included,
-                    "placement_cost_included": report.placement_cost_included,
-                    "minimum_item": report.minimum_item,
-                    "output_status": "success" if not validation_issues else "warning",
-                    "warnings": all_warnings,
-                }
+            excel_guarantor_details = get_excel_guarantor_details(values)
+            report = build_prepared_report(
+                row_number,
+                values,
+                project,
+                excel_guarantor_details,
             )
+            audit: Optional[GeminiAudit] = None
+            if gemini_client is not None:
+                print(f"  Calling Gemini: {model}")
+                audit = call_gemini(
+                    client=gemini_client,
+                    model=model,
+                    thinking_level=thinking_level,
+                    prompt_text=prompt_text,
+                    values=values,
+                    report=report,
+                    excel_details=excel_guarantor_details,
+                    use_google_search=use_google_search,
+                    store_interactions=store_interactions,
+                )
+                merge_gemini_guarantor_details(report, excel_guarantor_details, audit)
+            output_file = word_dir / report.filename
+            validation_issues = render_report(
+                template_file,
+                output_file,
+                report,
+                expected_field_counts=expected_field_counts,
+                update_fields=not args.no_word_field_update,
+            )
+            all_warnings = report.warnings + validation_issues
+            report_manifest = {
+                "row_number": report.row_number,
+                "sequence": report.sequence,
+                "branch": report.branch,
+                "name": report.name,
+                "filename": report.filename,
+                "report_number": report.report_number,
+                "debtor_count": report.debtor_count,
+                "guarantor_included": report.guarantor_included,
+                "placement_cost_included": report.placement_cost_included,
+                "minimum_item": report.minimum_item,
+                "output_status": "success" if not all_warnings else "warning",
+                "warnings": all_warnings,
+                "word_field_counts": get_field_code_counts(output_file),
+            }
+            if audit is not None:
+                report_manifest["gemini"] = {
+                    "interaction_id": audit.interaction_id,
+                    "model": audit.model,
+                    "usage": audit.usage,
+                    "guarantor_sources": audit.sources,
+                }
+            manifest["reports"].append(report_manifest)
             generated += 1
             print(f"  Saved: {output_file}")
             for warning in all_warnings:
