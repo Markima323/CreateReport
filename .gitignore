@@ -9,13 +9,16 @@ gemini_api.txt
 .venv/
 venv/
 .venv_create_report/
+build/
+dist/
+*.spec
 
 __pycache__/
 *.py[cod]
 
 word/
 InputPic/
-json/
+bin/json/
 error.log
 ~$*.docx
 ~$*.docm

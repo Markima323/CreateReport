@@ -6,7 +6,7 @@ Inputs default to:
 1) bin/template/价值分析报告-自动生成基底模板.docx
 2) bin/template/价值分析报告自动生成-Prompt.md
 3) bin/template/价值分析报告生成规则.json
-4) json/图片提取数据.json
+4) bin/json/图片提取数据.json
 """
 
 from __future__ import annotations
@@ -1273,13 +1273,21 @@ def update_word_fields(path: Path) -> Optional[str]:
                 continue
             while story_range is not None:
                 try:
-                    story_range.Fields.Update()
+                    for field_index in range(
+                        story_range.Fields.Count,
+                        0,
+                        -1,
+                    ):
+                        field = story_range.Fields.Item(field_index)
+                        if field.Type != 13:  # wdFieldTOC
+                            field.Update()
                 except Exception:
                     pass
                 try:
                     story_range = story_range.NextStoryRange
                 except Exception:
                     story_range = None
+        doc.Repaginate()
         for index in range(1, doc.TablesOfContents.Count + 1):
             doc.TablesOfContents.Item(index).Update()
         doc.Repaginate()
@@ -1372,7 +1380,7 @@ def resolve_defaults(project_root: Path) -> Dict[str, Path]:
         "rules_file": find_single_file(template_dir, "*规则.json", "规则JSON"),
         "template_file": find_single_file(template_dir, "*基底模板.docx", "Word模板"),
         "prompt_file": find_single_file(template_dir, "*Prompt.md", "Prompt文件"),
-        "records_file": project_root / "json" / "图片提取数据.json",
+        "records_file": project_root / "bin" / "json" / "图片提取数据.json",
     }
 
 
@@ -1509,9 +1517,9 @@ def build_parser(project_root: Path) -> argparse.ArgumentParser:
     return parser
 
 
-def main() -> int:
+def main(argv: Optional[Sequence[str]] = None) -> int:
     project_root = Path(__file__).resolve().parent.parent
-    args = build_parser(project_root).parse_args()
+    args = build_parser(project_root).parse_args(argv)
 
     template_file = Path(args.template_file).expanduser().resolve()
     prompt_file = Path(args.prompt_file).expanduser().resolve()

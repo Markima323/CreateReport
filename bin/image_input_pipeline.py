@@ -526,11 +526,11 @@ def build_parser(project_root: Path) -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--output-file",
-        default=str(project_root / "json" / "图片提取数据.json"),
+        default=str(project_root / "bin" / "json" / "图片提取数据.json"),
     )
     parser.add_argument(
         "--individual-dir",
-        default=str(project_root / "json" / "人员数据"),
+        default=str(project_root / "bin" / "json" / "人员数据"),
     )
     parser.add_argument(
         "--supplements-file",
@@ -548,9 +548,9 @@ def build_parser(project_root: Path) -> argparse.ArgumentParser:
     return parser
 
 
-def main() -> int:
+def main(argv: Optional[Sequence[str]] = None) -> int:
     project_root = Path(__file__).resolve().parent.parent
-    args = build_parser(project_root).parse_args()
+    args = build_parser(project_root).parse_args(argv)
     input_dir = Path(args.input_dir).expanduser().resolve()
     output_file = Path(args.output_file).expanduser().resolve()
     individual_dir = Path(args.individual_dir).expanduser().resolve()

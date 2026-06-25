@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import ctypes
+import contextlib
+import io
 import json
 import os
 import subprocess
@@ -15,6 +17,8 @@ from typing import Callable
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
+import image_input_pipeline as image_pipeline
+import process_excel_to_word as report_pipeline
 from process_excel_to_word import (
     create_gemini_client,
     extract_guarantor_details_from_text,
@@ -31,20 +35,43 @@ except ImportError:
     DND_AVAILABLE = False
 
 
-BIN_DIR = Path(__file__).resolve().parent
-PROJECT_ROOT = BIN_DIR.parent
+IS_FROZEN = bool(getattr(sys, "frozen", False))
+if IS_FROZEN:
+    executable_dir = Path(sys.executable).resolve().parent
+    if (
+        executable_dir.name.lower() == "dist"
+        and (executable_dir.parent / "bin").is_dir()
+    ):
+        PROJECT_ROOT = executable_dir.parent
+    else:
+        PROJECT_ROOT = executable_dir
+    BIN_DIR = PROJECT_ROOT / "bin"
+else:
+    BIN_DIR = Path(__file__).resolve().parent
+    PROJECT_ROOT = BIN_DIR.parent
 PROCESS_SCRIPT = BIN_DIR / "process_excel_to_word.py"
 IMAGE_PIPELINE_SCRIPT = BIN_DIR / "image_input_pipeline.py"
 DEFAULT_INPUT_DIR = PROJECT_ROOT / "InputPic"
-DEFAULT_RECORDS_FILE = PROJECT_ROOT / "json" / "图片提取数据.json"
-CURRENT_RECORDS_FILE = PROJECT_ROOT / "json" / "当前人员数据.json"
-DEFAULT_INDIVIDUAL_RECORDS_DIR = PROJECT_ROOT / "json" / "人员数据"
+JSON_DIR = BIN_DIR / "json"
+DEFAULT_RECORDS_FILE = JSON_DIR / "图片提取数据.json"
+CURRENT_RECORDS_FILE = JSON_DIR / "当前人员数据.json"
+DEFAULT_INDIVIDUAL_RECORDS_DIR = JSON_DIR / "人员数据"
+SETTINGS_FILE = JSON_DIR / "panel_settings.json"
 DEFAULT_SUPPLEMENTS = BIN_DIR / "template" / "图片输入补充数据.json"
 DEFAULT_TEMPLATE = BIN_DIR / "template" / "价值分析报告-自动生成基底模板.docx"
 DEFAULT_PROMPT = BIN_DIR / "template" / "价值分析报告自动生成-Prompt.md"
 DEFAULT_RULES = BIN_DIR / "template" / "价值分析报告生成规则.json"
 DEFAULT_OUTPUT = PROJECT_ROOT / "word"
 API_KEY_FILE = PROJECT_ROOT / "gemini_api.txt"
+APP_ICON_FILE = BIN_DIR / "with a pen" / "256x256.ico"
+
+DOCUMENT_TYPE_CONFIG = {
+    "1": {
+        "name": "当前价值分析报告",
+        "template": DEFAULT_TEMPLATE,
+        "prompt": DEFAULT_PROMPT,
+    },
+}
 
 WINDOW_BG = "#F4F5F2"
 PANEL_BG = "#FFFFFF"
@@ -88,6 +115,9 @@ def apply_tk_scaling(root: tk.Tk) -> None:
 class ReportGeneratorApp:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
+        self._settings_ready = False
+        self._settings_save_after_id: str | None = None
+        self.saved_settings = self._load_panel_settings()
         self.processing = False
         self.person_folders: list[Path] = []
         self.current_person_folder: Path | None = None
@@ -104,15 +134,25 @@ class ReportGeneratorApp:
         self.guarantor_status_var = tk.StringVar(value="")
         self.extraction_in_progress = False
         self._path_entries: list[tk.Entry] = []
-        self.input_dir_var = tk.StringVar(value=str(DEFAULT_INPUT_DIR))
+        self.input_dir_var = tk.StringVar(
+            value=str(self.saved_settings.get("input_dir") or DEFAULT_INPUT_DIR)
+        )
+        self.output_var = tk.StringVar(
+            value=str(self.saved_settings.get("output_dir") or DEFAULT_OUTPUT)
+        )
+        self.document_type_var = tk.StringVar(
+            value=str(self.saved_settings.get("document_type") or "1")
+        )
+        self.model_var = tk.StringVar(
+            value=str(self.saved_settings.get("model") or "gemini-3.5-flash")
+        )
         self.template_var = tk.StringVar(value=str(DEFAULT_TEMPLATE))
         self.prompt_var = tk.StringVar(value=str(DEFAULT_PROMPT))
-        self.output_var = tk.StringVar(value=str(DEFAULT_OUTPUT))
-        self.document_type_var = tk.StringVar(value="1")
-        self.model_var = tk.StringVar(value="gemini-3.5-flash")
         self.api_key_var = tk.StringVar(value=self._read_saved_api_key())
         self.show_key_var = tk.BooleanVar(value=False)
-        self.save_key_var = tk.BooleanVar(value=True)
+        self.save_key_var = tk.BooleanVar(
+            value=bool(self.saved_settings.get("save_api_key", True))
+        )
         self.status_var = tk.StringVar(value="就绪")
 
         self.root.title("价值分析报告生成器")
@@ -121,6 +161,11 @@ class ReportGeneratorApp:
         self.root.configure(bg=WINDOW_BG)
         self.root.columnconfigure(0, weight=1)
         self.root.rowconfigure(0, weight=1)
+        if APP_ICON_FILE.is_file():
+            try:
+                self.root.iconbitmap(default=str(APP_ICON_FILE))
+            except Exception:
+                pass
 
         self.main = tk.Frame(self.root, bg=WINDOW_BG, padx=28, pady=22)
         self.main.grid(row=0, column=0, sticky="nsew")
@@ -128,14 +173,88 @@ class ReportGeneratorApp:
         self.main.rowconfigure(5, weight=1)
 
         self._build_ui()
+        self._on_document_type_changed()
         self._register_drop_target()
+        self._bind_setting_persistence()
+        self._settings_ready = True
         self._refresh_state()
 
     def _read_saved_api_key(self) -> str:
+        if not bool(self.saved_settings.get("save_api_key", True)):
+            return ""
         try:
             return API_KEY_FILE.read_text(encoding="utf-8-sig").strip()
         except OSError:
             return ""
+
+    def _load_panel_settings(self) -> dict:
+        try:
+            payload = json.loads(SETTINGS_FILE.read_text(encoding="utf-8-sig"))
+            return payload if isinstance(payload, dict) else {}
+        except (OSError, ValueError):
+            return {}
+
+    def _bind_setting_persistence(self) -> None:
+        for variable in (
+            self.input_dir_var,
+            self.output_var,
+            self.document_type_var,
+            self.model_var,
+            self.api_key_var,
+            self.save_key_var,
+        ):
+            variable.trace_add("write", self._schedule_settings_save)
+
+    def _schedule_settings_save(self, *_args: object) -> None:
+        if not self._settings_ready:
+            return
+        if self._settings_save_after_id is not None:
+            self.root.after_cancel(self._settings_save_after_id)
+        self._settings_save_after_id = self.root.after(
+            300,
+            self._save_panel_settings,
+        )
+
+    def _save_panel_settings(self) -> None:
+        self._settings_save_after_id = None
+        payload = {
+            "schema_version": 1,
+            "input_dir": self.input_dir_var.get().strip(),
+            "output_dir": self.output_var.get().strip(),
+            "document_type": self.document_type_var.get(),
+            "model": self.model_var.get(),
+            "save_api_key": bool(self.save_key_var.get()),
+        }
+        SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            suffix=".json",
+            dir=SETTINGS_FILE.parent,
+            delete=False,
+        ) as handle:
+            temp_path = Path(handle.name)
+            json.dump(payload, handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
+        try:
+            temp_path.replace(SETTINGS_FILE)
+        finally:
+            if temp_path.exists():
+                temp_path.unlink()
+        if self.save_key_var.get() and self.api_key_var.get().strip():
+            API_KEY_FILE.write_text(
+                self.api_key_var.get().strip(),
+                encoding="utf-8",
+            )
+
+    def _apply_document_type(self) -> None:
+        config = DOCUMENT_TYPE_CONFIG.get(self.document_type_var.get())
+        if config is None:
+            self.template_var.set("")
+            self.prompt_var.set("")
+            return
+        self.template_var.set(str(config["template"]))
+        self.prompt_var.set(str(config["prompt"]))
 
     def _build_ui(self) -> None:
         tk.Label(
@@ -230,20 +349,6 @@ class ReportGeneratorApp:
         self._path_row(
             settings,
             1,
-            "Word 模板",
-            self.template_var,
-            self._select_template,
-        )
-        self._path_row(
-            settings,
-            2,
-            "Prompt",
-            self.prompt_var,
-            self._select_prompt,
-        )
-        self._path_row(
-            settings,
-            3,
             "输出目录",
             self.output_var,
             self._select_output,
@@ -256,9 +361,9 @@ class ReportGeneratorApp:
             bg=PANEL_BG,
             fg=TEXT_DARK,
             anchor="w",
-        ).grid(row=4, column=0, sticky="w", pady=(14, 0))
+        ).grid(row=2, column=0, sticky="w", pady=(14, 0))
         type_frame = tk.Frame(settings, bg=PANEL_BG)
-        type_frame.grid(row=4, column=1, sticky="w", pady=(14, 0))
+        type_frame.grid(row=2, column=1, sticky="w", pady=(14, 0))
         for text, value in (("1", "1"), ("2", "2")):
             tk.Radiobutton(
                 type_frame,
@@ -292,7 +397,7 @@ class ReportGeneratorApp:
             bg=PANEL_BG,
             fg=TEXT_DARK,
             anchor="w",
-        ).grid(row=5, column=0, sticky="w", pady=(12, 0))
+        ).grid(row=3, column=0, sticky="w", pady=(12, 0))
         self.model_combo = ttk.Combobox(
             settings,
             textvariable=self.model_var,
@@ -300,7 +405,7 @@ class ReportGeneratorApp:
             state="readonly",
             font=("Microsoft YaHei UI", 10),
         )
-        self.model_combo.grid(row=5, column=1, sticky="ew", pady=(12, 0))
+        self.model_combo.grid(row=3, column=1, sticky="ew", pady=(12, 0))
 
         actions = tk.Frame(self.main, bg=WINDOW_BG)
         actions.grid(row=3, column=0, sticky="ew", pady=(16, 12))
@@ -463,22 +568,6 @@ class ReportGeneratorApp:
         if path:
             self.input_dir_var.set(path)
 
-    def _select_template(self) -> None:
-        path = filedialog.askopenfilename(
-            title="选择 Word 模板",
-            filetypes=[("Word 模板", "*.docx"), ("所有文件", "*.*")],
-        )
-        if path:
-            self.template_var.set(path)
-
-    def _select_prompt(self) -> None:
-        path = filedialog.askopenfilename(
-            title="选择 Prompt",
-            filetypes=[("Markdown", "*.md"), ("文本文件", "*.txt"), ("所有文件", "*.*")],
-        )
-        if path:
-            self.prompt_var.set(path)
-
     def _select_output(self) -> None:
         path = filedialog.askdirectory(title="选择输出目录")
         if path:
@@ -488,6 +577,7 @@ class ReportGeneratorApp:
         self.api_key_entry.configure(show="" if self.show_key_var.get() else "*")
 
     def _on_document_type_changed(self) -> None:
+        self._apply_document_type()
         if self.document_type_var.get() == "1":
             self.type_note.configure(text="类型 1：当前价值分析报告", fg=TEXT_MID)
         else:
@@ -1021,11 +1111,21 @@ class ReportGeneratorApp:
         folder: Path | None = None,
     ) -> tuple[list[str], dict[str, str]]:
         folder = folder or self.current_person_folder
+        arguments = self._build_extraction_arguments(folder)
         command = [
             str(self._console_python()),
             "-X",
             "utf8",
             str(IMAGE_PIPELINE_SCRIPT),
+            *arguments,
+        ]
+        return command, self._build_environment()
+
+    def _build_extraction_arguments(
+        self,
+        folder: Path | None,
+    ) -> list[str]:
+        arguments = [
             "--input-dir",
             str(Path(self.input_dir_var.get()).expanduser().resolve()),
             "--output-file",
@@ -1042,14 +1142,21 @@ class ReportGeneratorApp:
             str(API_KEY_FILE),
         ]
         if folder is not None:
-            command.extend(["--folder", str(folder.resolve())])
-        return command, self._build_environment()
+            arguments.extend(["--folder", str(folder.resolve())])
+        return arguments
 
     def _image_extraction_worker(
         self,
         command: list[str],
         environment: dict[str, str],
     ) -> None:
+        if IS_FROZEN:
+            return_code = self._run_embedded_worker(
+                image_pipeline.main,
+                self._build_extraction_arguments(self.current_person_folder),
+            )
+            self.root.after(0, self._finish_image_extraction, return_code)
+            return
         creation_flags = subprocess.CREATE_NO_WINDOW if sys.platform.startswith("win") else 0
         try:
             process = subprocess.Popen(
@@ -1176,11 +1283,18 @@ class ReportGeneratorApp:
         worker.start()
 
     def _build_process_command(self) -> tuple[list[str], dict[str, str]]:
+        arguments = self._build_process_arguments()
         command = [
             str(self._console_python()),
             "-X",
             "utf8",
             str(PROCESS_SCRIPT),
+            *arguments,
+        ]
+        return command, self._build_environment()
+
+    def _build_process_arguments(self) -> list[str]:
+        return [
             "--records-file",
             str(CURRENT_RECORDS_FILE),
             "--template-file",
@@ -1199,13 +1313,19 @@ class ReportGeneratorApp:
             "--api-key-file",
             str(API_KEY_FILE),
         ]
-        return command, self._build_environment()
 
     def _generation_worker(
         self,
         command: list[str],
         environment: dict[str, str],
     ) -> None:
+        if IS_FROZEN:
+            return_code = self._run_embedded_worker(
+                report_pipeline.main,
+                self._build_process_arguments(),
+            )
+            self.root.after(0, self._finish_generation, return_code)
+            return
         creation_flags = subprocess.CREATE_NO_WINDOW if sys.platform.startswith("win") else 0
         try:
             process = subprocess.Popen(
@@ -1225,6 +1345,32 @@ class ReportGeneratorApp:
             self.root.after(0, self._finish_generation, return_code)
         except Exception as exc:
             self.root.after(0, self._finish_generation_error, str(exc))
+
+    def _run_embedded_worker(
+        self,
+        worker: Callable[[list[str]], int],
+        arguments: list[str],
+    ) -> int:
+        buffer = io.StringIO()
+        previous_api_key = os.environ.get("GEMINI_API_KEY")
+        if not self.save_key_var.get():
+            os.environ["GEMINI_API_KEY"] = self.api_key_var.get().strip()
+        try:
+            with contextlib.redirect_stdout(buffer), contextlib.redirect_stderr(buffer):
+                return_code = worker(arguments)
+        except Exception:
+            traceback.print_exc(file=buffer)
+            return_code = 1
+        finally:
+            if previous_api_key is None:
+                os.environ.pop("GEMINI_API_KEY", None)
+            else:
+                os.environ["GEMINI_API_KEY"] = previous_api_key
+        output = buffer.getvalue()
+        if output:
+            for line in output.splitlines():
+                self.root.after(0, self._append_log, line)
+        return return_code
 
     def _finish_generation(self, return_code: int) -> None:
         if return_code == 0:
