@@ -7,9 +7,11 @@ import mimetypes
 import re
 import sys
 import tempfile
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
+
+from openpyxl import load_workbook
 
 from process_excel_to_word import (
     DEFAULT_GEMINI_MODEL,
@@ -26,6 +28,7 @@ for stream in (sys.stdout, sys.stderr):
 
 
 SUPPORTED_IMAGE_SUFFIXES = {".bmp", ".jpeg", ".jpg", ".png", ".webp"}
+SUPPORTED_EXCEL_SUFFIXES = {".xlsx", ".xlsm"}
 
 RECORD_FIELDS = [
     "序号",
@@ -65,6 +68,25 @@ DEBTOR_FIELDS = [
     "民族",
     "身份证号码",
     "住址",
+]
+
+OPTIONAL_GUARANTOR_FIELDS = [
+    "保证人统一社会信用代码",
+    "保证人类型",
+    "保证人法定代表人",
+    "保证人成立日期",
+    "保证人营业场所",
+    "保证人经营范围",
+]
+
+EXCEL_RECORD_FIELDS = [
+    *RECORD_FIELDS,
+    *[
+        "债务人" + str(index) + ("" if field == "姓名" else field)
+        for index in range(1, 5)
+        for field in DEBTOR_FIELDS
+    ],
+    *OPTIONAL_GUARANTOR_FIELDS,
 ]
 
 GENERATION_REQUIRED_FIELDS = [
@@ -174,6 +196,181 @@ def list_images(folder: Path) -> List[Path]:
     if len(images) < 2:
         raise ValueError(f"{folder.name} 至少需要两张图片，当前只有 {len(images)} 张")
     return images
+
+
+def find_input_workbook(input_dir: Path) -> Path:
+    workbooks = sorted(
+        path
+        for path in input_dir.iterdir()
+        if (
+            path.is_file()
+            and not path.name.startswith("~$")
+            and path.suffix.lower() in SUPPORTED_EXCEL_SUFFIXES
+        )
+    )
+    if not workbooks:
+        raise FileNotFoundError(
+            f"图片输入目录根目录中未找到 Excel 文件（.xlsx/.xlsm）: {input_dir}"
+        )
+    if len(workbooks) > 1:
+        raise ValueError(
+            "图片输入目录根目录中存在多个 Excel 文件，请只保留一个: "
+            + ", ".join(path.name for path in workbooks)
+        )
+    return workbooks[0]
+
+
+def normalize_excel_header(value: Any) -> str:
+    return re.sub(r"\s+", "", clean_text(value))
+
+
+def normalize_person_name(value: Any) -> str:
+    return re.sub(r"\s+", "", clean_text(value))
+
+
+def normalize_branch(value: Any) -> str:
+    branch = normalize_person_name(value)
+    return branch[:-2] if branch.endswith("支行") else branch
+
+
+def normalize_sequence(value: Any) -> str:
+    text = clean_text(value)
+    if re.fullmatch(r"\d+\.0+", text):
+        return text.split(".", 1)[0]
+    return text
+
+
+def normalize_excel_value(value: Any) -> Any:
+    if isinstance(value, (date, datetime)):
+        return clean_text(value)
+    return normalize_scalar(value)
+
+
+def load_excel_records(workbook_file: Path) -> List[Dict[str, Any]]:
+    workbook = load_workbook(
+        filename=workbook_file,
+        read_only=True,
+        data_only=True,
+    )
+    records: List[Dict[str, Any]] = []
+    expected_headers = {
+        normalize_excel_header(field): field
+        for field in EXCEL_RECORD_FIELDS
+    }
+    try:
+        for worksheet in workbook.worksheets:
+            header_row_number = 0
+            header_columns: Dict[str, int] = {}
+            for row_number, row in enumerate(
+                worksheet.iter_rows(min_row=1, max_row=10, values_only=True),
+                start=1,
+            ):
+                candidate_columns = {
+                    normalize_excel_header(value): index
+                    for index, value in enumerate(row)
+                    if normalize_excel_header(value)
+                }
+                if (
+                    "姓名" in candidate_columns
+                    and "序号" in candidate_columns
+                    and "支行" in candidate_columns
+                ):
+                    header_row_number = row_number
+                    header_columns = candidate_columns
+                    break
+            if not header_row_number:
+                continue
+
+            for row_number, row in enumerate(
+                worksheet.iter_rows(
+                    min_row=header_row_number + 1,
+                    values_only=True,
+                ),
+                start=header_row_number + 1,
+            ):
+                data: Dict[str, Any] = {}
+                for normalized_header, field in expected_headers.items():
+                    column_index = header_columns.get(normalized_header)
+                    if column_index is None or column_index >= len(row):
+                        continue
+                    data[field] = normalize_excel_value(row[column_index])
+                if not normalize_person_name(data.get("姓名")):
+                    continue
+                records.append(
+                    {
+                        "file": str(workbook_file),
+                        "sheet": worksheet.title,
+                        "row": row_number,
+                        "data": data,
+                    }
+                )
+    finally:
+        workbook.close()
+    if not records:
+        raise ValueError(
+            f"Excel 中未找到包含“序号、支行、姓名”表头的数据表: {workbook_file}"
+        )
+    return records
+
+
+def match_excel_record(
+    records: Sequence[Dict[str, Any]],
+    sequence: str,
+    branch: str,
+    name: str,
+) -> Dict[str, Any]:
+    expected_name = normalize_person_name(name)
+    expected_sequence = normalize_sequence(sequence)
+    expected_branch = normalize_branch(branch)
+    candidates = [
+        item
+        for item in records
+        if normalize_person_name(item["data"].get("姓名")) == expected_name
+    ]
+    if not candidates:
+        raise ValueError(
+            f"Excel 中找不到姓名为“{name}”的数据行"
+        )
+
+    if len(candidates) > 1:
+        sequence_matches = [
+            item
+            for item in candidates
+            if normalize_sequence(item["data"].get("序号")) == expected_sequence
+        ]
+        if sequence_matches:
+            candidates = sequence_matches
+    if len(candidates) > 1:
+        branch_matches = [
+            item
+            for item in candidates
+            if normalize_branch(item["data"].get("支行")) == expected_branch
+        ]
+        if branch_matches:
+            candidates = branch_matches
+    if len(candidates) != 1:
+        locations = ", ".join(
+            f"{item['sheet']}!{item['row']}" for item in candidates
+        )
+        raise ValueError(
+            f"Excel 中“{name}”匹配到多行，无法唯一确定: {locations}"
+        )
+
+    matched = candidates[0]
+    data = matched["data"]
+    actual_sequence = normalize_sequence(data.get("序号"))
+    actual_branch = normalize_branch(data.get("支行"))
+    if actual_sequence and expected_sequence and actual_sequence != expected_sequence:
+        raise ValueError(
+            f"Excel 姓名“{name}”的序号为 {actual_sequence}，"
+            f"与文件夹序号 {expected_sequence} 不一致"
+        )
+    if actual_branch and expected_branch and actual_branch != expected_branch:
+        raise ValueError(
+            f"Excel 姓名“{name}”的支行为“{clean_text(data.get('支行'))}”，"
+            f"与文件夹支行“{branch}”不一致"
+        )
+    return matched
 
 
 def mime_type_for_image(path: Path) -> str:
@@ -320,6 +517,7 @@ def load_supplements(path: Path) -> Dict[str, Dict[str, Any]]:
 def build_record(
     extraction: Dict[str, Any],
     supplement: Dict[str, Any],
+    excel_match: Dict[str, Any],
 ) -> Dict[str, Any]:
     extracted = extraction["extracted"]
     record: Dict[str, Any] = {field: "" for field in RECORD_FIELDS}
@@ -360,6 +558,26 @@ def build_record(
         if field not in record or record[field] in ("", None):
             record[field] = value
 
+    excel_imported_fields: List[str] = []
+    excel_overridden_fields: List[Dict[str, Any]] = []
+    for field, value in excel_match["data"].items():
+        normalized_value = normalize_excel_value(value)
+        if normalized_value in ("", None):
+            continue
+        previous_value = record.get(field)
+        if previous_value not in ("", None):
+            if clean_text(previous_value) != clean_text(normalized_value):
+                excel_overridden_fields.append(
+                    {
+                        "field": field,
+                        "previous": previous_value,
+                        "excel": normalized_value,
+                    }
+                )
+        else:
+            excel_imported_fields.append(field)
+        record[field] = normalized_value
+
     missing_fields = [
         field
         for field in GENERATION_REQUIRED_FIELDS
@@ -377,6 +595,13 @@ def build_record(
             "interaction_id": extraction["interaction_id"],
             "model": extraction["model"],
             "usage": extraction["usage"],
+        },
+        "excel": {
+            "file": excel_match["file"],
+            "sheet": excel_match["sheet"],
+            "row": excel_match["row"],
+            "imported_fields": excel_imported_fields,
+            "overridden_fields": excel_overridden_fields,
         },
         "data": record,
         "missing_fields": missing_fields,
@@ -440,6 +665,8 @@ def extract_input_directory(
 ) -> Dict[str, Any]:
     client = create_gemini_client(api_key)
     supplements = load_supplements(supplements_file)
+    workbook_file = find_input_workbook(input_dir)
+    excel_records: Optional[List[Dict[str, Any]]] = None
     records: List[Dict[str, Any]] = []
     errors: List[Dict[str, Any]] = []
     if only_folder is not None:
@@ -451,6 +678,7 @@ def extract_input_directory(
     else:
         folders = list_person_folders(input_dir)
     print(f"发现人员文件夹: {len(folders)}")
+    print(f"Excel 数据源: {workbook_file.name}")
     for index, folder in enumerate(folders, start=1):
         print(f"[{index}/{len(folders)}] 提取图片: {folder.name}")
         try:
@@ -461,9 +689,23 @@ def extract_input_directory(
                 folder=folder,
                 store_interactions=store_interactions,
             )
+            print(f"  图片识别完成，开始匹配 Excel: {workbook_file.name}")
+            if excel_records is None:
+                excel_records = load_excel_records(workbook_file)
+            excel_match = match_excel_record(
+                excel_records,
+                extraction["sequence"],
+                extraction["branch"],
+                extraction["name"],
+            )
+            print(
+                f"  Excel 匹配: {excel_match['sheet']}!"
+                f"{excel_match['row']}（Excel 非空字段优先）"
+            )
             record = build_record(
                 extraction,
                 supplements.get(folder.name, {}),
+                excel_match,
             )
             records.append(record)
             write_json_atomic(
@@ -499,8 +741,9 @@ def extract_input_directory(
 
     result = {
         "schema_version": "2.0",
-        "source_type": "image_folders",
+        "source_type": "image_folders_with_excel",
         "source_root": str(input_dir),
+        "excel_file": str(workbook_file),
         "generated_at": datetime.now().isoformat(timespec="seconds"),
         "model": model,
         "records": records,

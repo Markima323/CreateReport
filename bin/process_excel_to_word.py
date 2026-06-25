@@ -1374,12 +1374,39 @@ def find_single_file(directory: Path, pattern: str, description: str) -> Path:
     return files[0]
 
 
+def get_runtime_project_root() -> Path:
+    if not bool(getattr(sys, "frozen", False)):
+        return Path(__file__).resolve().parent.parent
+    executable_dir = Path(sys.executable).resolve().parent
+    if (
+        executable_dir.name.lower() == "dist"
+        and (executable_dir.parent / "bin").is_dir()
+    ):
+        return executable_dir.parent
+    return executable_dir
+
+
 def resolve_defaults(project_root: Path) -> Dict[str, Path]:
     template_dir = project_root / "bin" / "template"
+    resource_dir = Path(getattr(sys, "_MEIPASS", "")) / "resources"
+    if bool(getattr(sys, "frozen", False)) and resource_dir.is_dir():
+        template_file = resource_dir / "report_template.docx"
+        prompt_file = resource_dir / "report_prompt.md"
+    else:
+        template_file = find_single_file(
+            template_dir,
+            "*基底模板.docx",
+            "Word模板",
+        )
+        prompt_file = find_single_file(
+            template_dir,
+            "*Prompt.md",
+            "Prompt文件",
+        )
     return {
         "rules_file": find_single_file(template_dir, "*规则.json", "规则JSON"),
-        "template_file": find_single_file(template_dir, "*基底模板.docx", "Word模板"),
-        "prompt_file": find_single_file(template_dir, "*Prompt.md", "Prompt文件"),
+        "template_file": template_file,
+        "prompt_file": prompt_file,
         "records_file": project_root / "bin" / "json" / "图片提取数据.json",
     }
 
@@ -1458,6 +1485,7 @@ def load_records(records_file: Path) -> Tuple[List[Dict[str, Any]], List[Dict[st
         record["_source_images"] = item.get("images") or []
         record["_extraction_warnings"] = item.get("warnings") or []
         record["_gemini"] = item.get("gemini") or {}
+        record["_excel"] = item.get("excel") or {}
         records.append(record)
     if isinstance(extraction_errors, list):
         for item in extraction_errors:
@@ -1518,7 +1546,7 @@ def build_parser(project_root: Path) -> argparse.ArgumentParser:
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
-    project_root = Path(__file__).resolve().parent.parent
+    project_root = get_runtime_project_root()
     args = build_parser(project_root).parse_args(argv)
 
     template_file = Path(args.template_file).expanduser().resolve()
@@ -1569,7 +1597,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "template": str(template_file),
         "prompt": str(prompt_file),
         "records_file": str(records_file),
-        "source_type": "image_folders",
+        "source_type": "image_folders_with_excel",
         "ai": {
             "provider": "Google Gemini",
             "model": model,
@@ -1656,6 +1684,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 "source_folder": source_folder,
                 "source_images": values.get("_source_images", []),
                 "image_extraction": values.get("_gemini", {}),
+                "excel_source": values.get("_excel", {}),
                 "filename": report.filename,
                 "report_number": report.report_number,
                 "debtor_count": report.debtor_count,

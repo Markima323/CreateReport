@@ -6,7 +6,7 @@
   "source_type": "image_folders",
   "ai": {
     "provider": "Google Gemini",
-    "model": "gemini-3.5-flash",
+    "model": "gemini-3.1-flash-lite",
     "api": "Interactions API",
     "enabled": false,
     "store_interactions": false
@@ -30,24 +30,24 @@
       ],
       "image_extraction": {
         "interaction_id": "",
-        "model": "gemini-3.5-flash",
+        "model": "gemini-3.1-flash-lite",
         "usage": {
-          "total_tokens": 4622,
+          "total_tokens": 3651,
           "total_input_tokens": 2579,
           "input_tokens_by_modality": [
             {
-              "modality": "image",
-              "tokens": 2163
-            },
-            {
               "modality": "text",
               "tokens": 416
+            },
+            {
+              "modality": "image",
+              "tokens": 2163
             }
           ],
           "total_cached_tokens": 0,
           "total_output_tokens": 220,
           "total_tool_use_tokens": 0,
-          "total_thought_tokens": 1823
+          "total_thought_tokens": 852
         }
       },
       "filename": "价值分析报告-工行个贷不良资产-吴中-钟占行.docx",
@@ -59,7 +59,7 @@
       "output_status": "success",
       "warnings": [],
       "word_field_counts": {
-        "fldChar": 72,
+        "fldChar": 96,
         "TOC": 1,
         "PAGEREF": 17,
         "PAGE": 2
@@ -78,24 +78,24 @@
       ],
       "image_extraction": {
         "interaction_id": "",
-        "model": "gemini-3.5-flash",
+        "model": "gemini-3.1-flash-lite",
         "usage": {
-          "total_tokens": 5339,
+          "total_tokens": 4029,
           "total_input_tokens": 3704,
           "input_tokens_by_modality": [
             {
-              "modality": "text",
-              "tokens": 428
-            },
-            {
               "modality": "image",
               "tokens": 3276
+            },
+            {
+              "modality": "text",
+              "tokens": 428
             }
           ],
           "total_cached_tokens": 0,
-          "total_output_tokens": 309,
+          "total_output_tokens": 325,
           "total_tool_use_tokens": 0,
-          "total_thought_tokens": 1326
+          "total_thought_tokens": 0
         }
       },
       "filename": "价值分析报告-工行个贷不良资产-吴中-李永超.docx",
@@ -104,10 +104,12 @@
       "guarantor_included": false,
       "placement_cost_included": true,
       "minimum_item": "抵押物可回收金额",
-      "output_status": "success",
-      "warnings": [],
+      "output_status": "warning",
+      "warnings": [
+        "图片提取: 登记簿中未直接注明保证人信息"
+      ],
       "word_field_counts": {
-        "fldChar": 72,
+        "fldChar": 96,
         "TOC": 1,
         "PAGEREF": 17,
         "PAGE": 2
@@ -126,24 +128,24 @@
       ],
       "image_extraction": {
         "interaction_id": "",
-        "model": "gemini-3.5-flash",
+        "model": "gemini-3.1-flash-lite",
         "usage": {
-          "total_tokens": 5402,
+          "total_tokens": 4037,
           "total_input_tokens": 3708,
           "input_tokens_by_modality": [
             {
-              "modality": "text",
-              "tokens": 432
-            },
-            {
               "modality": "image",
               "tokens": 3276
+            },
+            {
+              "modality": "text",
+              "tokens": 432
             }
           ],
           "total_cached_tokens": 0,
-          "total_output_tokens": 348,
+          "total_output_tokens": 329,
           "total_tool_use_tokens": 0,
-          "total_thought_tokens": 1346
+          "total_thought_tokens": 0
         }
       },
       "filename": "价值分析报告-工行个贷不良资产-吴中-仲路芹.docx",
@@ -152,12 +154,10 @@
       "guarantor_included": false,
       "placement_cost_included": true,
       "minimum_item": "资产抵押债权金额",
-      "output_status": "warning",
-      "warnings": [
-        "图片提取: 无法从登记簿中直接确认是否为第一顺位抵押"
-      ],
+      "output_status": "success",
+      "warnings": [],
       "word_field_counts": {
-        "fldChar": 72,
+        "fldChar": 96,
         "TOC": 1,
         "PAGEREF": 17,
         "PAGE": 2

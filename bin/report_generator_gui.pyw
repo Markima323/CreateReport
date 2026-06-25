@@ -38,6 +38,7 @@ except ImportError:
 IS_FROZEN = bool(getattr(sys, "frozen", False))
 if IS_FROZEN:
     executable_dir = Path(sys.executable).resolve().parent
+    RESOURCE_DIR = Path(getattr(sys, "_MEIPASS", executable_dir)) / "resources"
     if (
         executable_dir.name.lower() == "dist"
         and (executable_dir.parent / "bin").is_dir()
@@ -49,6 +50,7 @@ if IS_FROZEN:
 else:
     BIN_DIR = Path(__file__).resolve().parent
     PROJECT_ROOT = BIN_DIR.parent
+    RESOURCE_DIR = BIN_DIR / "template"
 PROCESS_SCRIPT = BIN_DIR / "process_excel_to_word.py"
 IMAGE_PIPELINE_SCRIPT = BIN_DIR / "image_input_pipeline.py"
 DEFAULT_INPUT_DIR = PROJECT_ROOT / "InputPic"
@@ -58,8 +60,16 @@ CURRENT_RECORDS_FILE = JSON_DIR / "当前人员数据.json"
 DEFAULT_INDIVIDUAL_RECORDS_DIR = JSON_DIR / "人员数据"
 SETTINGS_FILE = JSON_DIR / "panel_settings.json"
 DEFAULT_SUPPLEMENTS = BIN_DIR / "template" / "图片输入补充数据.json"
-DEFAULT_TEMPLATE = BIN_DIR / "template" / "价值分析报告-自动生成基底模板.docx"
-DEFAULT_PROMPT = BIN_DIR / "template" / "价值分析报告自动生成-Prompt.md"
+DEFAULT_TEMPLATE = (
+    RESOURCE_DIR / "report_template.docx"
+    if IS_FROZEN
+    else RESOURCE_DIR / "价值分析报告-自动生成基底模板.docx"
+)
+DEFAULT_PROMPT = (
+    RESOURCE_DIR / "report_prompt.md"
+    if IS_FROZEN
+    else RESOURCE_DIR / "价值分析报告自动生成-Prompt.md"
+)
 DEFAULT_RULES = BIN_DIR / "template" / "价值分析报告生成规则.json"
 DEFAULT_OUTPUT = PROJECT_ROOT / "word"
 API_KEY_FILE = PROJECT_ROOT / "gemini_api.txt"
@@ -121,6 +131,7 @@ class ReportGeneratorApp:
         self.processing = False
         self.person_folders: list[Path] = []
         self.current_person_folder: Path | None = None
+        self.input_workbook: Path | None = None
         self.total_person_count = 0
         self.completed_person_count = 0
         self.batch_records: list[dict] = []
@@ -612,8 +623,13 @@ class ReportGeneratorApp:
         ):
             if not Path(raw_path).expanduser().is_file():
                 return False, f"{label}不存在：\n{raw_path}"
-        if not Path(self.input_dir_var.get()).expanduser().is_dir():
+        input_dir = Path(self.input_dir_var.get()).expanduser()
+        if not input_dir.is_dir():
             return False, f"图片数据目录不存在：\n{self.input_dir_var.get()}"
+        try:
+            image_pipeline.find_input_workbook(input_dir.resolve())
+        except Exception as exc:
+            return False, str(exc)
         if not DEFAULT_RULES.is_file():
             return False, f"规则文件不存在：\n{DEFAULT_RULES}"
         if not self.api_key_var.get().strip():
@@ -1042,9 +1058,9 @@ class ReportGeneratorApp:
             return
 
         try:
-            self.person_folders = list_person_folders(
-                Path(self.input_dir_var.get()).expanduser().resolve()
-            )
+            input_dir = Path(self.input_dir_var.get()).expanduser().resolve()
+            self.person_folders = list_person_folders(input_dir)
+            self.input_workbook = image_pipeline.find_input_workbook(input_dir)
         except Exception as exc:
             messagebox.showerror("读取图片目录失败", str(exc))
             return
@@ -1063,8 +1079,10 @@ class ReportGeneratorApp:
         self._refresh_state()
         self._append_log(
             f"发现人员文件夹: {self.total_person_count}。"
-            "将按“图片提取 → Word 完成 → 下一人”串行处理。"
+            "将按“图片提取 → Excel 匹配覆盖 → Word 完成 → 下一人”"
+            "串行处理。"
         )
+        self._append_log(f"Excel 数据源：{self.input_workbook}")
         self._start_next_person()
 
     def _start_next_person(self) -> None:
@@ -1426,9 +1444,14 @@ class ReportGeneratorApp:
     def _write_batch_records(self) -> None:
         payload = {
             "schema_version": "2.0",
-            "source_type": "image_folders",
+            "source_type": "image_folders_with_excel",
             "source_root": str(
                 Path(self.input_dir_var.get()).expanduser().resolve()
+            ),
+            "excel_file": (
+                str(self.input_workbook)
+                if self.input_workbook is not None
+                else ""
             ),
             "generated_at": datetime.now().isoformat(timespec="seconds"),
             "model": self.model_var.get(),
