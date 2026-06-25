@@ -1,25 +1,89 @@
+# Secrets and local credentials
 api.txt
 gemini_api.txt
+**/api.txt
+**/gemini_api.txt
+**/*api_key*
+**/*apikey*
+**/*credential*
+**/*credentials*
+**/*secret*
+**/service-account*.json
+.env
+.env.*
+!.env.example
 *.key
 *.pem
 *.p12
-.env
-.env.*
+*.pfx
+*.jks
+*.keystore
+id_rsa*
+id_ed25519*
 
+# Customer inputs, extracted data, reports and local settings
+InputPic/
+word/
+excel/
+bin/json/
+bin/example/
+bin/generation_manifest*.json
+**/generation_manifest*.json
+bin/template/图片输入补充数据.json
+
+# Privacy-sensitive document and media formats
+*.xls
+*.xlsx
+*.xlsm
+*.xlsb
+*.csv
+*.docx
+*.docm
+*.pdf
+*.tif
+*.tiff
+*.jpg
+*.jpeg
+*.jfif
+*.png
+*.webp
+*.heic
+*.heif
+*.bmp
+*.gif
+*.zip
+*.7z
+*.rar
+
+# Required application asset: sanitized base template
+!bin/template/价值分析报告-自动生成基底模板.docx
+
+# Local databases, logs, dumps and temporary files
+*.db
+*.sqlite
+*.sqlite3
+*.log
+*.dump
+*.tmp
+*.temp
+*.bak
+*.backup
+error.log
+~$*
+
+# Python and build artifacts
 .venv/
+.venv*/
 venv/
-.venv_create_report/
+**/.venv/
+__pycache__/
+*.py[cod]
 build/
 dist/
 *.spec
 
-__pycache__/
-*.py[cod]
-
-word/
-InputPic/
-bin/json/
-error.log
-~$*.docx
-~$*.docm
-~$*.xlsx
+# Reference project generated artifacts
+bin/template/CreateIco/.venv/
+bin/template/CreateIco/build/
+bin/template/CreateIco/dist/
+bin/template/CreateIco/output/
