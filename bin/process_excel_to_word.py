@@ -1289,7 +1289,7 @@ def update_word_fields(path: Path) -> Optional[str]:
                     story_range = None
         doc.Repaginate()
         for index in range(1, doc.TablesOfContents.Count + 1):
-            doc.TablesOfContents.Item(index).Update()
+            doc.TablesOfContents.Item(index).UpdatePageNumbers()
         doc.Repaginate()
         doc.Save()
         return None
