@@ -1392,6 +1392,7 @@ def resolve_defaults(project_root: Path) -> Dict[str, Path]:
     if bool(getattr(sys, "frozen", False)) and resource_dir.is_dir():
         template_file = resource_dir / "report_template.docx"
         prompt_file = resource_dir / "report_prompt.md"
+        rules_file = resource_dir / "report_rules.json"
     else:
         template_file = find_single_file(
             template_dir,
@@ -1403,8 +1404,13 @@ def resolve_defaults(project_root: Path) -> Dict[str, Path]:
             "*Prompt.md",
             "Prompt文件",
         )
+        rules_file = find_single_file(
+            template_dir,
+            "*规则.json",
+            "规则JSON",
+        )
     return {
-        "rules_file": find_single_file(template_dir, "*规则.json", "规则JSON"),
+        "rules_file": rules_file,
         "template_file": template_file,
         "prompt_file": prompt_file,
         "records_file": project_root / "bin" / "json" / "图片提取数据.json",
@@ -1413,6 +1419,21 @@ def resolve_defaults(project_root: Path) -> Dict[str, Path]:
 
 def load_rules(rules_file: Path) -> Dict[str, Any]:
     return json.loads(rules_file.read_text(encoding="utf-8-sig"))
+
+
+def merge_saved_guarantors(
+    rules: Dict[str, Any],
+    guarantors_file: Path,
+) -> Dict[str, Any]:
+    merged = deepcopy(rules)
+    if not guarantors_file.is_file():
+        return merged
+    payload = json.loads(guarantors_file.read_text(encoding="utf-8-sig"))
+    guarantors = payload.get("guarantors", {})
+    if not isinstance(guarantors, dict):
+        raise ValueError(f"保证人资料的 guarantors 必须是对象: {guarantors_file}")
+    merged["guarantors"] = guarantors
+    return merged
 
 
 def load_project_values(rules: Dict[str, Any]) -> Dict[str, Any]:
@@ -1518,6 +1539,10 @@ def build_parser(project_root: Path) -> argparse.ArgumentParser:
     parser.add_argument("--template-file", default=str(defaults["template_file"]))
     parser.add_argument("--prompt-file", default=str(defaults["prompt_file"]))
     parser.add_argument("--rules-file", default=str(defaults["rules_file"]))
+    parser.add_argument(
+        "--guarantors-file",
+        default=str(project_root / "bin" / "json" / "保证人资料.json"),
+    )
     parser.add_argument("--records-file", default=str(defaults["records_file"]))
     parser.add_argument("--word-dir", default=str(project_root / "word"))
     parser.add_argument("--document-type", choices=["1", "2"], default="1")
@@ -1552,6 +1577,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     template_file = Path(args.template_file).expanduser().resolve()
     prompt_file = Path(args.prompt_file).expanduser().resolve()
     rules_file = Path(args.rules_file).expanduser().resolve()
+    guarantors_file = Path(args.guarantors_file).expanduser().resolve()
     records_file = Path(args.records_file).expanduser().resolve()
     word_dir = Path(args.word_dir).expanduser().resolve()
     api_key_file = Path(args.api_key_file).expanduser().resolve()
@@ -1571,7 +1597,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if not prompt_text:
         raise ValueError(f"Prompt文件为空: {prompt_file}")
 
-    rules = load_rules(rules_file)
+    rules = merge_saved_guarantors(
+        load_rules(rules_file),
+        guarantors_file,
+    )
     validate_document_type(rules, args.document_type)
     project = load_project_values(rules)
     ai_config = rules.get("ai", {})
@@ -1596,6 +1625,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "document_type": args.document_type,
         "template": str(template_file),
         "prompt": str(prompt_file),
+        "rules": str(rules_file),
+        "guarantors_file": str(guarantors_file),
         "records_file": str(records_file),
         "source_type": "image_folders_with_excel",
         "ai": {

@@ -23,6 +23,12 @@ def main() -> int:
         / "template"
         / "价值分析报告自动生成-Prompt.md"
     )
+    rules_file = (
+        project_root
+        / "bin"
+        / "template"
+        / "价值分析报告生成规则.json"
+    )
     output_file = project_root / "dist" / "CreateReport.exe"
 
     for label, path in (
@@ -30,6 +36,7 @@ def main() -> int:
         ("ICO file", icon_file),
         ("Word template", template_file),
         ("Prompt file", prompt_file),
+        ("Rules file", rules_file),
     ):
         if not path.is_file():
             raise FileNotFoundError(f"{label} not found: {path}")
@@ -38,8 +45,10 @@ def main() -> int:
     embedded_dir.mkdir(parents=True, exist_ok=True)
     embedded_template = embedded_dir / "report_template.docx"
     embedded_prompt = embedded_dir / "report_prompt.md"
+    embedded_rules = embedded_dir / "report_rules.json"
     shutil.copy2(template_file, embedded_template)
     shutil.copy2(prompt_file, embedded_prompt)
+    shutil.copy2(rules_file, embedded_rules)
 
     command = [
         sys.executable,
@@ -77,6 +86,8 @@ def main() -> int:
         f"{embedded_template}{os.pathsep}resources",
         "--add-data",
         f"{embedded_prompt}{os.pathsep}resources",
+        "--add-data",
+        f"{embedded_rules}{os.pathsep}resources",
         str(source_file),
     ]
     print("Building CreateReport.exe...")
@@ -87,6 +98,7 @@ def main() -> int:
     print(f"Embedded ICO: {icon_file}")
     print(f"Embedded Word template: {template_file}")
     print(f"Embedded Prompt: {prompt_file}")
+    print(f"Embedded Rules: {rules_file}")
     return 0
 
 

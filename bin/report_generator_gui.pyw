@@ -59,6 +59,7 @@ DEFAULT_RECORDS_FILE = JSON_DIR / "图片提取数据.json"
 CURRENT_RECORDS_FILE = JSON_DIR / "当前人员数据.json"
 DEFAULT_INDIVIDUAL_RECORDS_DIR = JSON_DIR / "人员数据"
 SETTINGS_FILE = JSON_DIR / "panel_settings.json"
+GUARANTOR_STORE_FILE = JSON_DIR / "保证人资料.json"
 DEFAULT_SUPPLEMENTS = BIN_DIR / "template" / "图片输入补充数据.json"
 DEFAULT_TEMPLATE = (
     RESOURCE_DIR / "report_template.docx"
@@ -70,7 +71,11 @@ DEFAULT_PROMPT = (
     if IS_FROZEN
     else RESOURCE_DIR / "价值分析报告自动生成-Prompt.md"
 )
-DEFAULT_RULES = BIN_DIR / "template" / "价值分析报告生成规则.json"
+DEFAULT_RULES = (
+    RESOURCE_DIR / "report_rules.json"
+    if IS_FROZEN
+    else RESOURCE_DIR / "价值分析报告生成规则.json"
+)
 DEFAULT_OUTPUT = PROJECT_ROOT / "word"
 API_KEY_FILE = PROJECT_ROOT / "gemini_api.txt"
 APP_ICON_FILE = BIN_DIR / "with a pen" / "256x256.ico"
@@ -641,22 +646,36 @@ class ReportGeneratorApp:
             API_KEY_FILE.write_text(self.api_key_var.get().strip(), encoding="utf-8")
 
     def _load_rules(self) -> dict:
-        return json.loads(DEFAULT_RULES.read_text(encoding="utf-8-sig"))
+        rules = json.loads(DEFAULT_RULES.read_text(encoding="utf-8-sig"))
+        try:
+            saved_payload = json.loads(
+                GUARANTOR_STORE_FILE.read_text(encoding="utf-8-sig")
+            )
+        except (OSError, ValueError):
+            saved_payload = {}
+        saved_guarantors = saved_payload.get("guarantors")
+        if isinstance(saved_guarantors, dict):
+            rules["guarantors"] = saved_guarantors
+        return rules
 
     def _save_rules(self, rules: dict) -> None:
-        DEFAULT_RULES.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "schema_version": 1,
+            "guarantors": rules.get("guarantors", {}),
+        }
+        GUARANTOR_STORE_FILE.parent.mkdir(parents=True, exist_ok=True)
         with tempfile.NamedTemporaryFile(
             mode="w",
             encoding="utf-8",
             suffix=".json",
-            dir=DEFAULT_RULES.parent,
+            dir=GUARANTOR_STORE_FILE.parent,
             delete=False,
         ) as handle:
             temp_path = Path(handle.name)
-            json.dump(rules, handle, ensure_ascii=False, indent=2)
+            json.dump(payload, handle, ensure_ascii=False, indent=2)
             handle.write("\n")
         try:
-            temp_path.replace(DEFAULT_RULES)
+            temp_path.replace(GUARANTOR_STORE_FILE)
         finally:
             if temp_path.exists():
                 temp_path.unlink()
@@ -1321,6 +1340,8 @@ class ReportGeneratorApp:
             str(Path(self.prompt_var.get()).expanduser().resolve()),
             "--rules-file",
             str(DEFAULT_RULES),
+            "--guarantors-file",
+            str(GUARANTOR_STORE_FILE),
             "--word-dir",
             str(Path(self.output_var.get()).expanduser().resolve()),
             "--document-type",
