@@ -546,7 +546,12 @@ def build_prepared_report(
 
     report_year = clean_text(project["报告年"])
     report_batch = clean_text(project["报告批次"])
-    report_number = f"天地恒安[{report_year}]资评咨字第{report_batch}-{sequence}号"
+    report_number = clean_text(values.get("报告号"))
+    if not report_number:
+        report_number = (
+            f"天地恒安[{report_year}]资评咨字第"
+            f"{report_batch}-{sequence}号"
+        )
     filename = f"价值分析报告-工行个贷不良资产-{branch_for_filename}-{name_for_filename}.docx"
 
     guarantor = clean_text(values.get("保证人"))
@@ -593,6 +598,7 @@ def build_prepared_report(
         "折现期限": fmt_plain_number(discount_term),
         "折现率百分比": fmt_percent_compact(discount_rate),
         "折现系数": fmt_decimal(discount_coeff, 4),
+        "报告号": report_number,
         "报告年": report_year,
         "报告批次": report_batch,
         "报告日期": clean_text(project["报告日期"]),

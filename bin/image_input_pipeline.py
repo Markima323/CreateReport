@@ -62,6 +62,7 @@ SUPPORTED_EXCEL_SUFFIXES = {".xlsx", ".xlsm"}
 
 RECORD_FIELDS = [
     "序号",
+    "报告号",
     "支行",
     "姓名",
     "基准日本金",
