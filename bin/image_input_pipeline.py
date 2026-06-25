@@ -895,11 +895,23 @@ def build_parser(project_root: Path) -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--supplements-file",
-        default=str(project_root / "bin" / "template" / "图片输入补充数据.json"),
+        default=str(
+            project_root
+            / "bin"
+            / "template"
+            / "1"
+            / "图片输入补充数据.json"
+        ),
     )
     parser.add_argument(
         "--rules-file",
-        default=str(project_root / "bin" / "template" / "价值分析报告生成规则.json"),
+        default=str(
+            project_root
+            / "bin"
+            / "template"
+            / "1"
+            / "价值分析报告生成规则.json"
+        ),
     )
     parser.add_argument("--model", default=None)
     parser.add_argument(

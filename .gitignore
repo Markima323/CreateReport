@@ -29,7 +29,7 @@ bin/json/
 bin/example/
 bin/generation_manifest*.json
 **/generation_manifest*.json
-bin/template/图片输入补充数据.json
+bin/template/1/图片输入补充数据.json
 
 # Privacy-sensitive document and media formats
 *.xls
@@ -56,7 +56,9 @@ bin/template/图片输入补充数据.json
 *.rar
 
 # Required application asset: sanitized base template
-!bin/template/价值分析报告-自动生成基底模板.docx
+!bin/template/1/价值分析报告-自动生成基底模板.docx
+!bin/template/2/企业价值评估报告-自动生成基底模板.docx
+!bin/template/2/企业价值评估说明-自动生成基底模板.docx
 
 # Local databases, logs, dumps and temporary files
 *.db

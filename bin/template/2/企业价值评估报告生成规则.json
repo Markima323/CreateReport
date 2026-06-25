@@ -1,0 +1,293 @@
+{
+  "schema_version": "1.0",
+  "document_type": "2",
+  "name": "企业价值评估报告及评估说明",
+  "enabled": true,
+  "source_type": "valuation_project_folder",
+  "resources": {
+    "report_template": "企业价值评估报告-自动生成基底模板.docx",
+    "explanation_template": "企业价值评估说明-自动生成基底模板.docx",
+    "prompt": "企业价值评估报告自动生成-Prompt.md",
+    "input_schema": "企业价值评估输入数据格式.json",
+    "method_library": "资产基础法评估方法库.json"
+  },
+  "outputs": [
+    {
+      "kind": "report",
+      "filename": "1-评估报告-{被评估单位}-{评估基准日}.docx",
+      "sections": [
+        "评估对象和评估范围",
+        "资产基础法具体评估方法介绍",
+        "评估结论"
+      ]
+    },
+    {
+      "kind": "explanation",
+      "filename": "2-评估说明-{被评估单位}-{评估基准日}.docx",
+      "sections": [
+        "评估对象与评估范围说明",
+        "实物资产的分布情况及特点",
+        "第三章：资产基础法评估技术说明"
+      ]
+    }
+  ],
+  "input_discovery": {
+    "ignore_names": [
+      "~$*"
+    ],
+    "excel_suffixes": [
+      ".xls",
+      ".xlsx",
+      ".xlsm"
+    ],
+    "detail_workbook_name_contains": "评估明细表",
+    "workpaper_name_keywords": [
+      "工作底稿",
+      "计算过程",
+      "测算表",
+      "收益法",
+      "市场法",
+      "交易案例"
+    ],
+    "visible_sheets_only": true
+  },
+  "primary_workbook_selection": {
+    "never_merge_multiple_entities": true,
+    "entity_source": "汇总-资产基础法!被评估单位",
+    "priority": [
+      "被评估单位与项目主体名称一致",
+      "文件名以3-或3.1-开头",
+      "文件名包含被评估单位简称"
+    ],
+    "on_ambiguous": "error"
+  },
+  "workbook_rules": {
+    "summary_sheet": "汇总-资产基础法",
+    "classification_sheet": "2分类汇总",
+    "summary_unit": "人民币万元",
+    "detail_default_unit": "人民币元",
+    "unit_source": "工作表中的金额单位文字",
+    "subject_name_from_sheet": "移除工作表名前导数字、点号及汇总字样",
+    "header_detection": "按表头文字识别，支持多行和合并单元格",
+    "item_count": "明细区序号列的最大有效整数",
+    "exclude_rows": [
+      "合计",
+      "小计",
+      "总计",
+      "空白行"
+    ]
+  },
+  "summary_categories": [
+    "流动资产",
+    "非流动资产",
+    "资产总计",
+    "流动负债",
+    "非流动负债",
+    "负债总计",
+    "股东全部权益价值",
+    "净资产（所有者权益）"
+  ],
+  "category_subjects": {
+    "流动资产": [
+      "货币资金",
+      "交易性金融资产",
+      "衍生金融资产",
+      "应收票据",
+      "应收账款",
+      "应收款项融资",
+      "预付款项",
+      "其他应收款",
+      "存货",
+      "合同资产",
+      "持有待售资产",
+      "一年内到期的非流动资产",
+      "其他流动资产"
+    ],
+    "非流动资产": [
+      "债权投资",
+      "其他债权投资",
+      "长期应收款",
+      "长期股权投资",
+      "其他权益工具投资",
+      "其他非流动金融资产",
+      "投资性房地产",
+      "固定资产",
+      "在建工程",
+      "生产性生物资产",
+      "油气资产",
+      "使用权资产",
+      "无形资产",
+      "开发支出",
+      "商誉",
+      "长期待摊费用",
+      "递延所得税资产",
+      "其他非流动资产"
+    ],
+    "流动负债": [
+      "短期借款",
+      "交易性金融负债",
+      "衍生金融负债",
+      "应付票据",
+      "应付账款",
+      "预收款项",
+      "合同负债",
+      "应付职工薪酬",
+      "应交税费",
+      "其他应付款",
+      "持有待售负债",
+      "一年内到期的非流动负债",
+      "其他流动负债"
+    ],
+    "非流动负债": [
+      "长期借款",
+      "应付债券",
+      "租赁负债",
+      "长期应付款",
+      "长期应付职工薪酬",
+      "预计负债",
+      "递延收益",
+      "递延所得税负债",
+      "其他非流动负债"
+    ]
+  },
+  "subject_aliases": {
+    "预付账款": "预付款项",
+    "银行存款": "货币资金",
+    "现金": "货币资金",
+    "其他货币资金": "货币资金",
+    "长期待摊": "长期待摊费用",
+    "其他流资": "其他流动资产",
+    "固定资产汇总": "固定资产",
+    "无形资产汇总": "无形资产",
+    "在建工程汇总": "在建工程",
+    "在建工程土建": "在建工程",
+    "在建工程设备": "在建工程",
+    "机器设备": "机器设备",
+    "办公电子设备": "电子设备",
+    "电子设备": "电子设备",
+    "房屋建筑物": "房屋建筑物",
+    "构筑物": "构筑物及其他辅助设施",
+    "技术类无形资产": "技术类无形资产",
+    "其他无形资产": "其他无形资产"
+  },
+  "scope_rules": {
+    "report_object": "{被评估单位}于评估基准日的股东全部权益价值",
+    "include_only_nonzero_book_categories": true,
+    "include_only_nonzero_book_subjects": true,
+    "noncurrent_rows_include_only_nonzero_book_value": true,
+    "zero_book_positive_assessed_omit_from_main_assets": true,
+    "zero_book_technical_intangibles_to_off_balance": true,
+    "no_off_balance_text": "本次评估企业无申报的表外资产。",
+    "reference_other_reports_default": "本资产评估报告的评估结论无引用其他机构出具的报告的结论。"
+  },
+  "description_rules": {
+    "money_unit": "万元",
+    "money_decimals": 2,
+    "normal_subject": "账面价值{账面价值万元}万元",
+    "impairment_zero": "未计提{准备名称}",
+    "impairment_nonzero": "计提{准备名称}{准备金额万元}万元",
+    "count_source": "最大有效序号",
+    "content_columns": [
+      "名称",
+      "名称及规格型号",
+      "设备名称",
+      "业务内容"
+    ],
+    "few_types": "完整列示",
+    "many_types": "按出现次数和金额合计排序后选取主要类型",
+    "age_summary": "选择金额占比最高的账龄区间"
+  },
+  "physical_asset_subjects": [
+    "存货",
+    "房屋建筑物",
+    "构筑物及其他辅助设施",
+    "机器设备",
+    "车辆",
+    "电子设备",
+    "在建工程",
+    "土地使用权"
+  ],
+  "method_rules": {
+    "order_source": "2分类汇总中的科目顺序",
+    "include_when": "账面价值不为0或评估价值不为0",
+    "completed_report_priority": true,
+    "fallback_library": "资产基础法评估方法库.json",
+    "require_workpaper_method_for": [
+      "房屋建筑物",
+      "构筑物及其他辅助设施",
+      "投资性房地产",
+      "土地使用权",
+      "技术类无形资产"
+    ],
+    "on_method_unknown": "warning_and_leave_blank"
+  },
+  "conclusion_rules": {
+    "source": "汇总-资产基础法",
+    "never_overwrite_source_numbers_with_ai": true,
+    "checks": [
+      "评估价值-账面价值=增减值",
+      "账面价值非0时增减值/账面价值=增值率",
+      "资产总计-负债总计=股东全部权益价值"
+    ],
+    "rate_tolerance": 0.0001,
+    "amount_tolerance_wanyuan": 0.01,
+    "final_method_source": "项目明确资料",
+    "on_final_method_unknown": "do_not_choose"
+  },
+  "equipment_rules": {
+    "enabled_as_optional_stage": true,
+    "sample_ratio": 0.1,
+    "price_priority": [
+      "名称和规格型号相似度",
+      "未折扣价格接近账面原值乘以1.13",
+      "启用日期与价格的合理关系"
+    ],
+    "electronic_depreciates_faster": true,
+    "shared_source_for_similar_items": true,
+    "market_source_action": {
+      "取价依据": "URL",
+      "购置单价（含税价）": "原始报价"
+    },
+    "no_market_source_action": {
+      "取价依据": "价格指数",
+      "categories": [
+        "通用设备",
+        "专用设备",
+        "电子设备",
+        "家具"
+      ],
+      "period": "评估基准日前最近一期"
+    },
+    "started_within_six_months": {
+      "取价依据": "账面价值"
+    },
+    "life_year_source": "统一年限.xlsx",
+    "default_life_years": {
+      "电子设备": 8,
+      "通用机器设备": 12
+    }
+  },
+  "ai": {
+    "provider": "Google Gemini",
+    "model": "gemini-3.5-flash",
+    "thinking_level": "medium",
+    "store_interactions": false,
+    "structured_json_only": true,
+    "serial_requests": true,
+    "allow_web_search_for_project_facts": false
+  },
+  "validation": {
+    "required_project_fields": [
+      "被评估单位",
+      "评估基准日"
+    ],
+    "required_sheets": [
+      "汇总-资产基础法",
+      "2分类汇总"
+    ],
+    "forbid_example_facts": true,
+    "forbid_hidden_sheet_data": true,
+    "forbid_parent_subsidiary_merge": true,
+    "unresolved_placeholder_is_error": true
+  }
+}

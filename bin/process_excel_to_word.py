@@ -3,9 +3,9 @@
 Generate one Word value-analysis report per complete image-extracted JSON record.
 
 Inputs default to:
-1) bin/template/价值分析报告-自动生成基底模板.docx
-2) bin/template/价值分析报告自动生成-Prompt.md
-3) bin/template/价值分析报告生成规则.json
+1) bin/template/1/价值分析报告-自动生成基底模板.docx
+2) bin/template/1/价值分析报告自动生成-Prompt.md
+3) bin/template/1/价值分析报告生成规则.json
 4) bin/json/图片提取数据.json
 """
 
@@ -1405,12 +1405,12 @@ def get_runtime_project_root() -> Path:
 
 
 def resolve_defaults(project_root: Path) -> Dict[str, Path]:
-    template_dir = project_root / "bin" / "template"
-    resource_dir = Path(getattr(sys, "_MEIPASS", "")) / "resources"
+    template_dir = project_root / "bin" / "template" / "1"
+    resource_dir = Path(getattr(sys, "_MEIPASS", "")) / "resources" / "1"
     if bool(getattr(sys, "frozen", False)) and resource_dir.is_dir():
-        template_file = resource_dir / "report_template.docx"
-        prompt_file = resource_dir / "report_prompt.md"
-        rules_file = resource_dir / "report_rules.json"
+        template_file = resource_dir / "价值分析报告-自动生成基底模板.docx"
+        prompt_file = resource_dir / "价值分析报告自动生成-Prompt.md"
+        rules_file = resource_dir / "价值分析报告生成规则.json"
     else:
         template_file = find_single_file(
             template_dir,

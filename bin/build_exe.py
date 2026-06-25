@@ -11,44 +11,47 @@ def main() -> int:
     project_root = Path(__file__).resolve().parent.parent
     source_file = project_root / "bin" / "report_generator_gui.pyw"
     icon_file = project_root / "bin" / "with a pen" / "256x256.ico"
-    template_file = (
-        project_root
-        / "bin"
-        / "template"
-        / "价值分析报告-自动生成基底模板.docx"
-    )
-    prompt_file = (
-        project_root
-        / "bin"
-        / "template"
-        / "价值分析报告自动生成-Prompt.md"
-    )
-    rules_file = (
-        project_root
-        / "bin"
-        / "template"
-        / "价值分析报告生成规则.json"
-    )
+    template_root = project_root / "bin" / "template"
+    resource_files = {
+        "1": [
+            template_root / "1" / "价值分析报告-自动生成基底模板.docx",
+            template_root / "1" / "价值分析报告自动生成-Prompt.md",
+            template_root / "1" / "价值分析报告生成规则.json",
+        ],
+        "2": [
+            template_root / "2" / "企业价值评估报告-自动生成基底模板.docx",
+            template_root / "2" / "企业价值评估说明-自动生成基底模板.docx",
+            template_root / "2" / "企业价值评估报告自动生成-Prompt.md",
+            template_root / "2" / "企业价值评估报告生成规则.json",
+            template_root / "2" / "企业价值评估输入数据格式.json",
+            template_root / "2" / "资产基础法评估方法库.json",
+            template_root / "2" / "类型2文档生成规律说明.md",
+        ],
+    }
     output_file = project_root / "dist" / "CreateReport.exe"
 
-    for label, path in (
+    required_files = [
         ("GUI source", source_file),
         ("ICO file", icon_file),
-        ("Word template", template_file),
-        ("Prompt file", prompt_file),
-        ("Rules file", rules_file),
-    ):
+    ]
+    required_files.extend(
+        (f"Type {document_type} resource", path)
+        for document_type, paths in resource_files.items()
+        for path in paths
+    )
+    for label, path in required_files:
         if not path.is_file():
             raise FileNotFoundError(f"{label} not found: {path}")
 
     embedded_dir = project_root / "build" / "embedded_resources"
-    embedded_dir.mkdir(parents=True, exist_ok=True)
-    embedded_template = embedded_dir / "report_template.docx"
-    embedded_prompt = embedded_dir / "report_prompt.md"
-    embedded_rules = embedded_dir / "report_rules.json"
-    shutil.copy2(template_file, embedded_template)
-    shutil.copy2(prompt_file, embedded_prompt)
-    shutil.copy2(rules_file, embedded_rules)
+    if embedded_dir.exists():
+        shutil.rmtree(embedded_dir)
+    embedded_dir.mkdir(parents=True)
+    for document_type, paths in resource_files.items():
+        target_dir = embedded_dir / document_type
+        target_dir.mkdir()
+        for path in paths:
+            shutil.copy2(path, target_dir / path.name)
 
     command = [
         sys.executable,
@@ -72,26 +75,42 @@ def main() -> int:
         str(project_root / "bin"),
         "--collect-all",
         "tkinterdnd2",
-        "--collect-all",
-        "openpyxl",
-        "--collect-all",
-        "PIL",
-        "--collect-all",
-        "pymupdf",
-        "--collect-submodules",
-        "win32com",
         "--hidden-import",
         "pythoncom",
         "--hidden-import",
         "pywintypes",
         "--hidden-import",
         "win32timezone",
+        "--exclude-module",
+        "pandas",
+        "--exclude-module",
+        "numpy",
+        "--exclude-module",
+        "scipy",
+        "--exclude-module",
+        "torch",
+        "--exclude-module",
+        "tensorflow",
+        "--exclude-module",
+        "matplotlib",
+        "--exclude-module",
+        "PySide6",
+        "--exclude-module",
+        "IPython",
+        "--exclude-module",
+        "sphinx",
+        "--exclude-module",
+        "pyarrow",
+        "--exclude-module",
+        "tables",
+        "--exclude-module",
+        "numba",
+        "--exclude-module",
+        "dask",
         "--add-data",
-        f"{embedded_template}{os.pathsep}resources",
+        f"{embedded_dir / '1'}{os.pathsep}resources/1",
         "--add-data",
-        f"{embedded_prompt}{os.pathsep}resources",
-        "--add-data",
-        f"{embedded_rules}{os.pathsep}resources",
+        f"{embedded_dir / '2'}{os.pathsep}resources/2",
         str(source_file),
     ]
     print("Building CreateReport.exe...")
@@ -100,9 +119,9 @@ def main() -> int:
         raise FileNotFoundError(f"PyInstaller did not create: {output_file}")
     print(f"EXE created: {output_file}")
     print(f"Embedded ICO: {icon_file}")
-    print(f"Embedded Word template: {template_file}")
-    print(f"Embedded Prompt: {prompt_file}")
-    print(f"Embedded Rules: {rules_file}")
+    for document_type, paths in resource_files.items():
+        for path in paths:
+            print(f"Embedded type {document_type} resource: {path}")
     return 0
 
 

@@ -18,7 +18,7 @@
     "excel_precedence": "Excel 非空字段覆盖图片识别与补充 JSON 的同名字段",
     "records_output": "bin/json/图片提取数据.json",
     "one_folder_one_report": true,
-    "supplements": "bin/template/图片输入补充数据.json"
+    "supplements": "bin/template/1/图片输入补充数据.json"
   },
   "project_defaults": {
     "项目年": 2025,

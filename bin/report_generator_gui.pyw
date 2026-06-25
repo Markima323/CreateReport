@@ -19,6 +19,7 @@ from tkinter import filedialog, messagebox, ttk
 
 import image_input_pipeline as image_pipeline
 import process_excel_to_word as report_pipeline
+import type2_report_pipeline as type2_pipeline
 from process_excel_to_word import (
     create_gemini_client,
     extract_guarantor_details_from_text,
@@ -38,7 +39,7 @@ except ImportError:
 IS_FROZEN = bool(getattr(sys, "frozen", False))
 if IS_FROZEN:
     executable_dir = Path(sys.executable).resolve().parent
-    RESOURCE_DIR = Path(getattr(sys, "_MEIPASS", executable_dir)) / "resources"
+    RESOURCE_ROOT = Path(getattr(sys, "_MEIPASS", executable_dir)) / "resources"
     if (
         executable_dir.name.lower() == "dist"
         and (executable_dir.parent / "bin").is_dir()
@@ -50,32 +51,34 @@ if IS_FROZEN:
 else:
     BIN_DIR = Path(__file__).resolve().parent
     PROJECT_ROOT = BIN_DIR.parent
-    RESOURCE_DIR = BIN_DIR / "template"
+    RESOURCE_ROOT = BIN_DIR / "template"
+TYPE1_RESOURCE_DIR = RESOURCE_ROOT / "1"
+TYPE2_RESOURCE_DIR = RESOURCE_ROOT / "2"
 PROCESS_SCRIPT = BIN_DIR / "process_excel_to_word.py"
 IMAGE_PIPELINE_SCRIPT = BIN_DIR / "image_input_pipeline.py"
+TYPE2_PROCESS_SCRIPT = BIN_DIR / "type2_report_pipeline.py"
 DEFAULT_INPUT_DIR = PROJECT_ROOT / "InputPic"
 JSON_DIR = BIN_DIR / "json"
 DEFAULT_RECORDS_FILE = JSON_DIR / "图片提取数据.json"
 CURRENT_RECORDS_FILE = JSON_DIR / "当前人员数据.json"
+TYPE2_RECORDS_FILE = JSON_DIR / "类型2输入数据.json"
 DEFAULT_INDIVIDUAL_RECORDS_DIR = JSON_DIR / "人员数据"
 SETTINGS_FILE = JSON_DIR / "panel_settings.json"
 GUARANTOR_STORE_FILE = JSON_DIR / "保证人资料.json"
-DEFAULT_SUPPLEMENTS = BIN_DIR / "template" / "图片输入补充数据.json"
-DEFAULT_TEMPLATE = (
-    RESOURCE_DIR / "report_template.docx"
-    if IS_FROZEN
-    else RESOURCE_DIR / "价值分析报告-自动生成基底模板.docx"
+DEFAULT_SUPPLEMENTS = (
+    BIN_DIR / "template" / "1" / "图片输入补充数据.json"
 )
-DEFAULT_PROMPT = (
-    RESOURCE_DIR / "report_prompt.md"
-    if IS_FROZEN
-    else RESOURCE_DIR / "价值分析报告自动生成-Prompt.md"
+DEFAULT_TEMPLATE = TYPE1_RESOURCE_DIR / "价值分析报告-自动生成基底模板.docx"
+DEFAULT_PROMPT = TYPE1_RESOURCE_DIR / "价值分析报告自动生成-Prompt.md"
+DEFAULT_RULES = TYPE1_RESOURCE_DIR / "价值分析报告生成规则.json"
+TYPE2_REPORT_TEMPLATE = (
+    TYPE2_RESOURCE_DIR / "企业价值评估报告-自动生成基底模板.docx"
 )
-DEFAULT_RULES = (
-    RESOURCE_DIR / "report_rules.json"
-    if IS_FROZEN
-    else RESOURCE_DIR / "价值分析报告生成规则.json"
+TYPE2_EXPLANATION_TEMPLATE = (
+    TYPE2_RESOURCE_DIR / "企业价值评估说明-自动生成基底模板.docx"
 )
+TYPE2_PROMPT = TYPE2_RESOURCE_DIR / "企业价值评估报告自动生成-Prompt.md"
+TYPE2_RULES = TYPE2_RESOURCE_DIR / "企业价值评估报告生成规则.json"
 DEFAULT_OUTPUT = PROJECT_ROOT / "word"
 API_KEY_FILE = PROJECT_ROOT / "gemini_api.txt"
 APP_ICON_FILE = BIN_DIR / "with a pen" / "256x256.ico"
@@ -85,6 +88,14 @@ DOCUMENT_TYPE_CONFIG = {
         "name": "当前价值分析报告",
         "template": DEFAULT_TEMPLATE,
         "prompt": DEFAULT_PROMPT,
+        "rules": DEFAULT_RULES,
+    },
+    "2": {
+        "name": "企业价值评估报告及评估说明",
+        "template": TYPE2_REPORT_TEMPLATE,
+        "explanation_template": TYPE2_EXPLANATION_TEMPLATE,
+        "prompt": TYPE2_PROMPT,
+        "rules": TYPE2_RULES,
     },
 }
 
@@ -354,7 +365,7 @@ class ReportGeneratorApp:
         settings.grid(row=2, column=0, sticky="ew")
         settings.columnconfigure(1, weight=1)
 
-        self._path_row(
+        self.input_dir_label = self._path_row(
             settings,
             0,
             "图片数据目录",
@@ -506,15 +517,16 @@ class ReportGeneratorApp:
         label: str,
         variable: tk.StringVar,
         command: Callable[[], None],
-    ) -> None:
-        tk.Label(
+    ) -> tk.Label:
+        label_widget = tk.Label(
             parent,
             text=label,
             font=("Microsoft YaHei UI", 10, "bold"),
             bg=PANEL_BG,
             fg=TEXT_DARK,
             anchor="w",
-        ).grid(row=row, column=0, sticky="w", pady=5)
+        )
+        label_widget.grid(row=row, column=0, sticky="w", pady=5)
         entry = tk.Entry(
             parent,
             textvariable=variable,
@@ -536,6 +548,7 @@ class ReportGeneratorApp:
             padx=14,
             pady=7,
         ).grid(row=row, column=2, pady=5)
+        return label_widget
 
     def _button(
         self,
@@ -580,7 +593,12 @@ class ReportGeneratorApp:
             self.input_dir_var.set(str(directory.resolve()))
 
     def _select_input_dir(self) -> None:
-        path = filedialog.askdirectory(title="选择图片数据根目录")
+        title = (
+            "选择图片数据根目录"
+            if self.document_type_var.get() == "1"
+            else "选择企业价值评估项目目录"
+        )
+        path = filedialog.askdirectory(title=title)
         if path:
             self.input_dir_var.set(path)
 
@@ -596,8 +614,13 @@ class ReportGeneratorApp:
         self._apply_document_type()
         if self.document_type_var.get() == "1":
             self.type_note.configure(text="类型 1：当前价值分析报告", fg=TEXT_MID)
+            self.input_dir_label.configure(text="图片数据目录")
         else:
-            self.type_note.configure(text="类型 2：尚未配置", fg=ERROR)
+            self.type_note.configure(
+                text="类型 2：企业价值评估报告及评估说明",
+                fg=TEXT_MID,
+            )
+            self.input_dir_label.configure(text="评估项目目录")
         self._refresh_state()
 
     def _append_log(self, text: str) -> None:
@@ -620,23 +643,34 @@ class ReportGeneratorApp:
             messagebox.showerror("打开失败", f"无法打开输出目录：\n{output}\n\n{exc}")
 
     def _validate_inputs(self) -> tuple[bool, str]:
-        if self.document_type_var.get() != "1":
-            return False, "文档类型 2 尚未配置模板和生成规则。"
+        document_type = self.document_type_var.get()
+        config = DOCUMENT_TYPE_CONFIG.get(document_type)
+        if config is None:
+            return False, f"未知文档类型：{document_type}"
         for label, raw_path in (
             ("Word 模板", self.template_var.get()),
             ("Prompt", self.prompt_var.get()),
+            ("规则文件", str(config["rules"])),
         ):
             if not Path(raw_path).expanduser().is_file():
                 return False, f"{label}不存在：\n{raw_path}"
+        if document_type == "2":
+            explanation_template = Path(config["explanation_template"])
+            if not explanation_template.is_file():
+                return False, f"评估说明模板不存在：\n{explanation_template}"
         input_dir = Path(self.input_dir_var.get()).expanduser()
         if not input_dir.is_dir():
-            return False, f"图片数据目录不存在：\n{self.input_dir_var.get()}"
-        try:
-            image_pipeline.find_input_workbook(input_dir.resolve())
-        except Exception as exc:
-            return False, str(exc)
-        if not DEFAULT_RULES.is_file():
-            return False, f"规则文件不存在：\n{DEFAULT_RULES}"
+            return False, f"输入目录不存在：\n{self.input_dir_var.get()}"
+        if document_type == "1":
+            try:
+                image_pipeline.find_input_workbook(input_dir.resolve())
+            except Exception as exc:
+                return False, str(exc)
+        else:
+            try:
+                type2_pipeline.discover_excel_files(input_dir.resolve())
+            except Exception as exc:
+                return False, str(exc)
         if not self.api_key_var.get().strip():
             return False, "请填写 Gemini API Key。"
         return True, ""
@@ -1057,7 +1091,7 @@ class ReportGeneratorApp:
         self.model_combo.configure(state="disabled" if self.processing else "readonly")
         self.clear_log_button.configure(state=state)
         self.open_output_button.configure(state=state)
-        can_run = not self.processing and self.document_type_var.get() == "1"
+        can_run = not self.processing and self.document_type_var.get() in {"1", "2"}
         self.run_button.configure(
             state="normal" if can_run else "disabled",
             text="生成中..." if self.processing else "开始生成",
@@ -1074,6 +1108,10 @@ class ReportGeneratorApp:
             self._save_api_key()
         except OSError as exc:
             messagebox.showerror("保存密钥失败", str(exc))
+            return
+
+        if self.document_type_var.get() == "2":
+            self._start_type2_generation()
             return
 
         try:
@@ -1103,6 +1141,107 @@ class ReportGeneratorApp:
         )
         self._append_log(f"Excel 数据源：{self.input_workbook}")
         self._start_next_person()
+
+    def _start_type2_generation(self) -> None:
+        self.processing = True
+        self.status_var.set("正在提取类型 2 项目数据")
+        self._refresh_state()
+        self._append_log(
+            "开始类型 2 流程：评估明细表与工作底稿提取 → "
+            "Gemini 生成章节 → 输出评估报告和评估说明。"
+        )
+        arguments = self._build_type2_arguments()
+        command = [
+            str(self._console_python()),
+            "-X",
+            "utf8",
+            str(TYPE2_PROCESS_SCRIPT),
+            *arguments,
+        ]
+        worker = threading.Thread(
+            target=self._type2_generation_worker,
+            args=(command, arguments, self._build_environment()),
+            daemon=True,
+        )
+        worker.start()
+
+    def _build_type2_arguments(self) -> list[str]:
+        config = DOCUMENT_TYPE_CONFIG["2"]
+        return [
+            "--input-dir",
+            str(Path(self.input_dir_var.get()).expanduser().resolve()),
+            "--word-dir",
+            str(Path(self.output_var.get()).expanduser().resolve()),
+            "--records-file",
+            str(TYPE2_RECORDS_FILE),
+            "--report-template",
+            str(Path(config["template"]).resolve()),
+            "--explanation-template",
+            str(Path(config["explanation_template"]).resolve()),
+            "--prompt-file",
+            str(Path(config["prompt"]).resolve()),
+            "--rules-file",
+            str(Path(config["rules"]).resolve()),
+            "--method-library",
+            str((TYPE2_RESOURCE_DIR / "资产基础法评估方法库.json").resolve()),
+            "--model",
+            self.model_var.get(),
+            "--api-key-file",
+            str(API_KEY_FILE),
+        ]
+
+    def _type2_generation_worker(
+        self,
+        command: list[str],
+        arguments: list[str],
+        environment: dict[str, str],
+    ) -> None:
+        if IS_FROZEN:
+            return_code = self._run_embedded_worker(
+                type2_pipeline.main,
+                arguments,
+            )
+            self.root.after(0, self._finish_type2_generation, return_code)
+            return
+        creation_flags = (
+            subprocess.CREATE_NO_WINDOW
+            if sys.platform.startswith("win")
+            else 0
+        )
+        try:
+            process = subprocess.Popen(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                env=environment,
+                creationflags=creation_flags,
+            )
+            assert process.stdout is not None
+            for line in process.stdout:
+                self.root.after(0, self._append_log, line)
+            return_code = process.wait()
+            self.root.after(0, self._finish_type2_generation, return_code)
+        except Exception as exc:
+            self.root.after(0, self._finish_generation_error, str(exc))
+
+    def _finish_type2_generation(self, return_code: int) -> None:
+        self.processing = False
+        self._refresh_state()
+        if return_code == 0:
+            self.status_var.set("类型 2 生成完成")
+            self._append_log("类型 2 的评估报告和评估说明已生成。")
+            messagebox.showinfo(
+                "生成完成",
+                "评估报告和评估说明已生成。\n"
+                f"输出目录：\n{self.output_var.get()}",
+            )
+            return
+        self.status_var.set("类型 2 生成失败")
+        self._append_log(f"类型 2 生成失败，退出代码：{return_code}")
+        messagebox.showerror("生成失败", "请查看面板中的运行日志。")
 
     def _start_next_person(self) -> None:
         if not self.person_folders:

@@ -1,0 +1,148 @@
+{
+  "schema_version": "1.0",
+  "document_type": "2",
+  "source_type": "valuation_project_folder",
+  "source_root": "",
+  "generated_at": "",
+  "project": {
+    "被评估单位": "",
+    "评估基准日": "",
+    "审计状态": "",
+    "评估对象": "",
+    "评估范围": "",
+    "最终评估方法": "",
+    "最终评估值万元": null,
+    "最终评估值大写": "",
+    "结论有效期开始日": "",
+    "结论有效期截止日": ""
+  },
+  "primary_workbook": {
+    "file": "",
+    "entity": "",
+    "selection_reason": "",
+    "visible_sheets": [],
+    "hidden_sheets_ignored": []
+  },
+  "related_workbooks": [
+    {
+      "file": "",
+      "entity": "",
+      "relationship": "subsidiary_or_related_entity",
+      "used_for_parent_scope": false
+    }
+  ],
+  "asset_basis_summary": {
+    "sheet": "汇总-资产基础法",
+    "unit": "人民币万元",
+    "rows": [
+      {
+        "序号": "",
+        "项目": "",
+        "账面价值": null,
+        "评估价值": null,
+        "增减值": null,
+        "增值率": null
+      }
+    ]
+  },
+  "classification_summary": {
+    "sheet": "2分类汇总",
+    "unit": "人民币元",
+    "rows": [
+      {
+        "序号": "",
+        "类别": "",
+        "科目名称": "",
+        "账面价值": null,
+        "评估价值": null,
+        "增减值": null,
+        "增值率": null
+      }
+    ]
+  },
+  "subject_order": [],
+  "subjects": [
+    {
+      "category": "",
+      "subject": "",
+      "sheet": "",
+      "unit": "人民币元",
+      "book_value": null,
+      "assessed_value": null,
+      "increase_decrease": null,
+      "increase_rate": null,
+      "item_count": null,
+      "impairment": {
+        "name": "",
+        "amount": null
+      },
+      "main_age_bucket": "",
+      "content_summary": [],
+      "location_summary": [],
+      "detail_headers": [],
+      "representative_rows": [],
+      "source_workpaper_files": [],
+      "actual_valuation_method": "",
+      "warnings": []
+    }
+  ],
+  "physical_assets": [
+    {
+      "subject": "",
+      "item_count": null,
+      "area_sqm": null,
+      "main_names": [],
+      "structures": [],
+      "locations": [],
+      "acquisition_methods": [],
+      "use_status": [],
+      "ownership_status": [],
+      "source_sheets": [],
+      "source_workpapers": []
+    }
+  ],
+  "off_balance_assets": [
+    {
+      "asset_type": "",
+      "count": null,
+      "categories": [],
+      "names": [],
+      "book_value": null,
+      "assessed_value": null,
+      "source_sheet": ""
+    }
+  ],
+  "workpapers": [
+    {
+      "file": "",
+      "kind": "",
+      "visible_sheets": [],
+      "valuation_method": "",
+      "key_parameters": {},
+      "warnings": []
+    }
+  ],
+  "final_conclusion": {
+    "method": "",
+    "book_value_wanyuan": null,
+    "assessed_value_wanyuan": null,
+    "increase_decrease_wanyuan": null,
+    "increase_rate": null,
+    "amount_uppercase": "",
+    "source": ""
+  },
+  "generated_sections": {
+    "report": {
+      "评估对象和评估范围": [],
+      "资产基础法具体评估方法介绍": [],
+      "评估结论": []
+    },
+    "explanation": {
+      "评估对象与评估范围说明": [],
+      "实物资产的分布情况及特点": [],
+      "资产基础法评估技术说明": []
+    }
+  },
+  "warnings": [],
+  "errors": []
+}
