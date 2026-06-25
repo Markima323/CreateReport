@@ -790,8 +790,8 @@ class GeminiInteractionsClient:
                     marker in body.lower()
                     for marker in (
                         "prepayment credits are depleted",
-                        "billing",
-                        "insufficient",
+                        "insufficient credits",
+                        "billing account is not active",
                     )
                 )
                 if (

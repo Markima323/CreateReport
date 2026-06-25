@@ -8,6 +8,7 @@ import sys
 import tempfile
 import threading
 import traceback
+from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
@@ -18,6 +19,7 @@ from process_excel_to_word import (
     create_gemini_client,
     extract_guarantor_details_from_text,
 )
+from image_input_pipeline import list_person_folders
 
 try:
     from tkinterdnd2 import DND_FILES, TkinterDnD
@@ -35,6 +37,7 @@ PROCESS_SCRIPT = BIN_DIR / "process_excel_to_word.py"
 IMAGE_PIPELINE_SCRIPT = BIN_DIR / "image_input_pipeline.py"
 DEFAULT_INPUT_DIR = PROJECT_ROOT / "InputPic"
 DEFAULT_RECORDS_FILE = PROJECT_ROOT / "json" / "图片提取数据.json"
+CURRENT_RECORDS_FILE = PROJECT_ROOT / "json" / "当前人员数据.json"
 DEFAULT_INDIVIDUAL_RECORDS_DIR = PROJECT_ROOT / "json" / "人员数据"
 DEFAULT_SUPPLEMENTS = BIN_DIR / "template" / "图片输入补充数据.json"
 DEFAULT_TEMPLATE = BIN_DIR / "template" / "价值分析报告-自动生成基底模板.docx"
@@ -56,6 +59,7 @@ RUST_ACTIVE = "#9E4D2A"
 GRAY_BUTTON = "#657069"
 GRAY_ACTIVE = "#525B55"
 ERROR = "#A33A32"
+SERIAL_NEXT_DELAY_MS = 3000
 
 
 def enable_windows_dpi_awareness() -> None:
@@ -85,6 +89,14 @@ class ReportGeneratorApp:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         self.processing = False
+        self.person_folders: list[Path] = []
+        self.current_person_folder: Path | None = None
+        self.total_person_count = 0
+        self.completed_person_count = 0
+        self.batch_records: list[dict] = []
+        self.batch_reports: list[dict] = []
+        self.batch_errors: list[dict] = []
+        self.batch_manifest_base: dict = {}
         self.pending_guarantors: list[str] = []
         self.current_guarantor = ""
         self.guarantor_dialog: tk.Toplevel | None = None
@@ -543,9 +555,12 @@ class ReportGeneratorApp:
             if temp_path.exists():
                 temp_path.unlink()
 
-    def _find_guarantors(self) -> list[str]:
+    def _find_guarantors(
+        self,
+        records_file: Path = CURRENT_RECORDS_FILE,
+    ) -> list[str]:
         payload = json.loads(
-            DEFAULT_RECORDS_FILE.read_text(encoding="utf-8-sig")
+            records_file.read_text(encoding="utf-8-sig")
         )
         guarantors: list[str] = []
         for item in payload.get("records", []):
@@ -899,6 +914,8 @@ class ReportGeneratorApp:
         self.guarantor_dialog = None
         self.guarantor_source_text = None
         self.pending_guarantors.clear()
+        self.person_folders.clear()
+        self.current_person_folder = None
         self.current_guarantor = ""
         self.processing = False
         self.status_var.set("已取消")
@@ -934,11 +951,48 @@ class ReportGeneratorApp:
             messagebox.showerror("保存密钥失败", str(exc))
             return
 
+        try:
+            self.person_folders = list_person_folders(
+                Path(self.input_dir_var.get()).expanduser().resolve()
+            )
+        except Exception as exc:
+            messagebox.showerror("读取图片目录失败", str(exc))
+            return
+
         self.processing = True
-        self.status_var.set("正在从图片提取 JSON")
+        self.total_person_count = len(self.person_folders)
+        self.completed_person_count = 0
+        self.current_person_folder = None
+        self.pending_guarantors.clear()
+        self.batch_records = []
+        self.batch_reports = []
+        self.batch_errors = []
+        self.batch_manifest_base = {}
+        self._write_batch_records()
+        self.status_var.set("准备串行生成")
         self._refresh_state()
-        self._append_log("开始遍历图片文件夹并调用 Gemini 提取 JSON...")
-        command, environment = self._build_extraction_command()
+        self._append_log(
+            f"发现人员文件夹: {self.total_person_count}。"
+            "将按“图片提取 → Word 完成 → 下一人”串行处理。"
+        )
+        self._start_next_person()
+
+    def _start_next_person(self) -> None:
+        if not self.person_folders:
+            self._finish_batch_success()
+            return
+        self.current_person_folder = self.person_folders.pop(0)
+        person_number = self.completed_person_count + 1
+        self.status_var.set(
+            f"正在处理 {person_number}/{self.total_person_count}"
+        )
+        self._append_log(
+            f"[{person_number}/{self.total_person_count}] "
+            f"开始图片提取：{self.current_person_folder.name}"
+        )
+        command, environment = self._build_extraction_command(
+            self.current_person_folder
+        )
         worker = threading.Thread(
             target=self._image_extraction_worker,
             args=(command, environment),
@@ -962,7 +1016,11 @@ class ReportGeneratorApp:
             environment["GEMINI_API_KEY"] = self.api_key_var.get().strip()
         return environment
 
-    def _build_extraction_command(self) -> tuple[list[str], dict[str, str]]:
+    def _build_extraction_command(
+        self,
+        folder: Path | None = None,
+    ) -> tuple[list[str], dict[str, str]]:
+        folder = folder or self.current_person_folder
         command = [
             str(self._console_python()),
             "-X",
@@ -971,7 +1029,7 @@ class ReportGeneratorApp:
             "--input-dir",
             str(Path(self.input_dir_var.get()).expanduser().resolve()),
             "--output-file",
-            str(DEFAULT_RECORDS_FILE),
+            str(CURRENT_RECORDS_FILE),
             "--individual-dir",
             str(DEFAULT_INDIVIDUAL_RECORDS_DIR),
             "--supplements-file",
@@ -983,6 +1041,8 @@ class ReportGeneratorApp:
             "--api-key-file",
             str(API_KEY_FILE),
         ]
+        if folder is not None:
+            command.extend(["--folder", str(folder.resolve())])
         return command, self._build_environment()
 
     def _image_extraction_worker(
@@ -1012,43 +1072,65 @@ class ReportGeneratorApp:
 
     def _finish_image_extraction(self, return_code: int) -> None:
         if return_code != 0:
-            self.processing = False
-            self.status_var.set("图片提取不完整")
-            self._refresh_state()
-            error_message = self._get_image_extraction_error_message()
+            self.status_var.set("当前人员图片提取失败")
+            error_message = self._get_image_extraction_error_message(
+                CURRENT_RECORDS_FILE
+            )
             self._append_log(error_message)
+            self._stop_batch()
             messagebox.showerror(
                 "图片提取未完成",
                 error_message,
             )
             return
         try:
-            self.pending_guarantors = self._find_guarantors()
+            payload = json.loads(
+                CURRENT_RECORDS_FILE.read_text(encoding="utf-8-sig")
+            )
+            records = payload.get("records") or []
+            if len(records) != 1:
+                raise ValueError(
+                    f"当前人员 JSON 应包含 1 条记录，实际为 {len(records)} 条"
+                )
+            current_record = records[0]
+            if current_record.get("status") != "ready":
+                missing = current_record.get("missing_fields") or []
+                raise ValueError(
+                    "当前人员数据不完整: "
+                    + ", ".join(str(field) for field in missing)
+                )
+            self.pending_guarantors = self._find_guarantors(
+                CURRENT_RECORDS_FILE
+            )
         except Exception as exc:
-            self.processing = False
             self.status_var.set("读取图片 JSON 失败")
-            self._refresh_state()
+            self._stop_batch()
             messagebox.showerror("读取图片 JSON 失败", str(exc))
             return
-        self._append_log(f"图片 JSON 已生成：{DEFAULT_RECORDS_FILE}")
+        self._append_log(
+            f"图片 JSON 已生成：{CURRENT_RECORDS_FILE}"
+        )
         if self.pending_guarantors:
             self._append_log(
-                f"识别到 {len(self.pending_guarantors)} 个唯一保证人，"
-                "请逐一确认资料。"
+                f"识别到保证人：{self.pending_guarantors[0]}，"
+                "请确认资料。"
             )
             self.status_var.set("等待保证人资料")
             self._show_next_guarantor_dialog()
             return
         self._launch_generation()
 
-    def _get_image_extraction_error_message(self) -> str:
+    def _get_image_extraction_error_message(
+        self,
+        records_file: Path = CURRENT_RECORDS_FILE,
+    ) -> str:
         fallback = (
             "图片提取出现错误或存在缺失字段，请查看运行日志和：\n"
-            f"{DEFAULT_RECORDS_FILE}"
+            f"{records_file}"
         )
         try:
             payload = json.loads(
-                DEFAULT_RECORDS_FILE.read_text(encoding="utf-8-sig")
+                records_file.read_text(encoding="utf-8-sig")
             )
             errors = payload.get("errors") or []
             first_error = str((errors[0] or {}).get("error") or "").strip()
@@ -1060,9 +1142,13 @@ class ReportGeneratorApp:
             or "预付费额度已耗尽" in first_error
         ):
             return (
-                "Gemini API 预付费额度已耗尽，图片尚未提取。\n\n"
-                "请在 Google AI Studio 中为当前 API Key 所属项目充值，"
-                "或在面板顶部更换一个有可用额度的 Gemini API Key 后重试。"
+                "Gemini API 返回 429（too_many_requests / "
+                "RESOURCE_EXHAUSTED）。\n\n"
+                "API 的详细原因是：预付费额度已耗尽。\n"
+                "Google AI Studio 将 RPM、TPM、RPD 和消费额度限制统一"
+                "归类为 429，因此控制台显示 too many requests 并不代表"
+                "一定是并发请求过多。\n\n"
+                "请为当前项目充值，或在面板顶部更换有可用额度的 API Key。"
             )
         if "api key" in lowered and any(
             marker in lowered
@@ -1070,12 +1156,17 @@ class ReportGeneratorApp:
         ):
             return "Gemini API Key 无效或已失效，请在面板顶部更换后重试。"
         if first_error:
-            return f"图片提取失败：\n{first_error}\n\n详情：{DEFAULT_RECORDS_FILE}"
+            return f"图片提取失败：\n{first_error}\n\n详情：{records_file}"
         return fallback
 
     def _launch_generation(self) -> None:
-        self.status_var.set("正在生成")
-        self._append_log("开始生成文档...")
+        current_name = (
+            self.current_person_folder.name
+            if self.current_person_folder is not None
+            else "当前人员"
+        )
+        self.status_var.set("正在生成当前人员 Word")
+        self._append_log(f"开始生成 Word：{current_name}")
         command, environment = self._build_process_command()
         worker = threading.Thread(
             target=self._generation_worker,
@@ -1091,7 +1182,7 @@ class ReportGeneratorApp:
             "utf8",
             str(PROCESS_SCRIPT),
             "--records-file",
-            str(DEFAULT_RECORDS_FILE),
+            str(CURRENT_RECORDS_FILE),
             "--template-file",
             str(Path(self.template_var.get()).expanduser().resolve()),
             "--prompt-file",
@@ -1136,21 +1227,111 @@ class ReportGeneratorApp:
             self.root.after(0, self._finish_generation_error, str(exc))
 
     def _finish_generation(self, return_code: int) -> None:
-        self.processing = False
-        self._refresh_state()
         if return_code == 0:
-            self.status_var.set("生成完成")
-            self._append_log("生成完成。")
-            messagebox.showinfo("生成完成", f"文档已输出到：\n{self.output_var.get()}")
+            current_name = (
+                self.current_person_folder.name
+                if self.current_person_folder is not None
+                else "当前人员"
+            )
+            try:
+                self._capture_current_results()
+            except Exception as exc:
+                self.status_var.set("汇总当前人员结果失败")
+                self._stop_batch()
+                messagebox.showerror("汇总失败", str(exc))
+                return
+            self.completed_person_count += 1
+            self._append_log(
+                f"Word 已完成：{current_name} "
+                f"({self.completed_person_count}/{self.total_person_count})"
+            )
+            self.current_person_folder = None
+            self.pending_guarantors.clear()
+            self.status_var.set("等待下一人")
+            self.root.after(SERIAL_NEXT_DELAY_MS, self._start_next_person)
         else:
             self.status_var.set("生成失败")
             self._append_log(f"生成失败，退出代码：{return_code}")
+            self._stop_batch()
             messagebox.showerror("生成失败", "请查看面板中的运行日志。")
 
-    def _finish_generation_error(self, error: str) -> None:
+    def _capture_current_results(self) -> None:
+        records_payload = json.loads(
+            CURRENT_RECORDS_FILE.read_text(encoding="utf-8-sig")
+        )
+        current_records = records_payload.get("records") or []
+        if len(current_records) != 1:
+            raise ValueError("当前人员提取结果数量不正确")
+        self.batch_records.append(current_records[0])
+
+        manifest_file = Path(self.output_var.get()).expanduser().resolve() / "generation_manifest.json"
+        manifest = json.loads(manifest_file.read_text(encoding="utf-8-sig"))
+        if not self.batch_manifest_base:
+            self.batch_manifest_base = {
+                key: value
+                for key, value in manifest.items()
+                if key not in {"reports", "errors"}
+            }
+        self.batch_reports.extend(manifest.get("reports") or [])
+        self.batch_errors.extend(manifest.get("errors") or [])
+        self._write_batch_records()
+        self._write_batch_manifest()
+
+    def _write_batch_records(self) -> None:
+        payload = {
+            "schema_version": "2.0",
+            "source_type": "image_folders",
+            "source_root": str(
+                Path(self.input_dir_var.get()).expanduser().resolve()
+            ),
+            "generated_at": datetime.now().isoformat(timespec="seconds"),
+            "model": self.model_var.get(),
+            "records": self.batch_records,
+            "errors": self.batch_errors,
+        }
+        DEFAULT_RECORDS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        DEFAULT_RECORDS_FILE.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+    def _write_batch_manifest(self) -> None:
+        output_dir = Path(self.output_var.get()).expanduser().resolve()
+        output_dir.mkdir(parents=True, exist_ok=True)
+        manifest = dict(self.batch_manifest_base)
+        manifest["reports"] = self.batch_reports
+        manifest["errors"] = self.batch_errors
+        (output_dir / "generation_manifest.json").write_text(
+            json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+    def _finish_batch_success(self) -> None:
+        self._write_batch_records()
+        self._write_batch_manifest()
         self.processing = False
-        self.status_var.set("启动失败")
+        self.current_person_folder = None
+        self.status_var.set("全部生成完成")
         self._refresh_state()
+        self._append_log(
+            f"全部完成，共生成 {self.completed_person_count} 份 Word。"
+        )
+        messagebox.showinfo(
+            "生成完成",
+            f"已按顺序生成 {self.completed_person_count} 份文档。\n"
+            f"输出目录：\n{self.output_var.get()}",
+        )
+
+    def _stop_batch(self) -> None:
+        self.processing = False
+        self.person_folders.clear()
+        self.current_person_folder = None
+        self.pending_guarantors.clear()
+        self._refresh_state()
+
+    def _finish_generation_error(self, error: str) -> None:
+        self.status_var.set("启动失败")
+        self._stop_batch()
         self._append_log(error)
         messagebox.showerror("启动失败", error)
 

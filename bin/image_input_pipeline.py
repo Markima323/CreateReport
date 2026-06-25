@@ -9,7 +9,7 @@ import sys
 import tempfile
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from process_excel_to_word import (
     DEFAULT_GEMINI_MODEL,
@@ -409,8 +409,15 @@ def friendly_extraction_error(exc: Exception) -> str:
     lowered = error_text.lower()
     if "prepayment credits are depleted" in lowered:
         return (
-            "Gemini API 预付费额度已耗尽，请在 Google AI Studio 充值，"
+            "Gemini API 429（too_many_requests / RESOURCE_EXHAUSTED）；"
+            "API 详细原因：预付费额度已耗尽。请在 Google AI Studio 充值，"
             "或更换有可用额度的 API Key"
+        )
+    if "gemini api http 429" in lowered:
+        return (
+            "Gemini API 429（too_many_requests / RESOURCE_EXHAUSTED）；"
+            "可能超过 RPM、TPM、RPD 或消费额度限制，请稍后重试并检查 "
+            "Google AI Studio 的项目限额"
         )
     if "api key" in lowered and any(
         marker in lowered
@@ -429,12 +436,20 @@ def extract_input_directory(
     model: str,
     thinking_level: str,
     store_interactions: bool,
+    only_folder: Optional[Path] = None,
 ) -> Dict[str, Any]:
     client = create_gemini_client(api_key)
     supplements = load_supplements(supplements_file)
     records: List[Dict[str, Any]] = []
     errors: List[Dict[str, Any]] = []
-    folders = list_person_folders(input_dir)
+    if only_folder is not None:
+        folder = only_folder.resolve()
+        if not folder.is_dir():
+            raise FileNotFoundError(f"人员图片文件夹不存在: {folder}")
+        parse_folder_name(folder.name)
+        folders = [folder]
+    else:
+        folders = list_person_folders(input_dir)
     print(f"发现人员文件夹: {len(folders)}")
     for index, folder in enumerate(folders, start=1):
         print(f"[{index}/{len(folders)}] 提取图片: {folder.name}")
@@ -468,8 +483,8 @@ def extract_input_directory(
                 marker in error_text
                 for marker in (
                     "prepayment credits are depleted",
-                    "billing",
-                    "insufficient",
+                    "insufficient credits",
+                    "billing account is not active",
                 )
             ):
                 for skipped_folder in folders[index:]:
@@ -505,6 +520,11 @@ def build_parser(project_root: Path) -> argparse.ArgumentParser:
         default=str(project_root / "InputPic"),
     )
     parser.add_argument(
+        "--folder",
+        default=None,
+        help="仅处理一个人员文件夹，用于串行生成流程。",
+    )
+    parser.add_argument(
         "--output-file",
         default=str(project_root / "json" / "图片提取数据.json"),
     )
@@ -537,6 +557,11 @@ def main() -> int:
     supplements_file = Path(args.supplements_file).expanduser().resolve()
     rules_file = Path(args.rules_file).expanduser().resolve()
     api_key_file = Path(args.api_key_file).expanduser().resolve()
+    only_folder = (
+        Path(args.folder).expanduser().resolve()
+        if args.folder
+        else None
+    )
 
     rules = load_rules(rules_file)
     ai_config = rules.get("ai", {})
@@ -554,6 +579,7 @@ def main() -> int:
         model=model,
         thinking_level=thinking_level,
         store_interactions=store_interactions,
+        only_folder=only_folder,
     )
     incomplete = sum(
         1 for record in result["records"] if record["status"] != "ready"
