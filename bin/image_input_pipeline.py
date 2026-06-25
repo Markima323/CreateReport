@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import argparse
 import base64
+import io
 import json
-import mimetypes
 import re
 import sys
 import tempfile
@@ -11,7 +11,9 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+import pymupdf
 from openpyxl import load_workbook
+from PIL import Image, ImageOps, UnidentifiedImageError
 
 from process_excel_to_word import (
     DEFAULT_GEMINI_MODEL,
@@ -27,7 +29,35 @@ for stream in (sys.stdout, sys.stderr):
         stream.reconfigure(encoding="utf-8", errors="replace")
 
 
-SUPPORTED_IMAGE_SUFFIXES = {".bmp", ".jpeg", ".jpg", ".png", ".webp"}
+DIRECT_IMAGE_MIME_TYPES = {
+    ".jpeg": "image/jpeg",
+    ".jpg": "image/jpeg",
+    ".jfif": "image/jpeg",
+    ".png": "image/png",
+    ".webp": "image/webp",
+    ".heic": "image/heic",
+    ".heif": "image/heif",
+}
+CONVERTED_IMAGE_SUFFIXES = {
+    ".avif",
+    ".bmp",
+    ".dib",
+    ".gif",
+    ".ico",
+    ".pbm",
+    ".pcx",
+    ".pgm",
+    ".ppm",
+    ".tga",
+    ".tif",
+    ".tiff",
+}
+PDF_SUFFIXES = {".pdf"}
+SUPPORTED_IMAGE_SUFFIXES = (
+    set(DIRECT_IMAGE_MIME_TYPES) | CONVERTED_IMAGE_SUFFIXES | PDF_SUFFIXES
+)
+MAX_IMAGE_FRAMES_PER_FILE = 50
+PDF_RENDER_DPI = 200
 SUPPORTED_EXCEL_SUFFIXES = {".xlsx", ".xlsm"}
 
 RECORD_FIELDS = [
@@ -194,7 +224,23 @@ def list_images(folder: Path) -> List[Path]:
         if path.is_file() and path.suffix.lower() in SUPPORTED_IMAGE_SUFFIXES
     )
     if len(images) < 2:
-        raise ValueError(f"{folder.name} 至少需要两张图片，当前只有 {len(images)} 张")
+        ignored_files = sorted(
+            path.name
+            for path in folder.iterdir()
+            if path.is_file()
+            and not path.name.startswith("~$")
+            and path.suffix.lower() not in SUPPORTED_IMAGE_SUFFIXES
+        )
+        ignored_note = (
+            f"；未识别文件: {', '.join(ignored_files)}"
+            if ignored_files
+            else ""
+        )
+        supported = ", ".join(sorted(SUPPORTED_IMAGE_SUFFIXES))
+        raise ValueError(
+            f"{folder.name} 至少需要两张图片，当前识别到 {len(images)} 张"
+            f"{ignored_note}。支持格式: {supported}"
+        )
     return images
 
 
@@ -373,16 +419,86 @@ def match_excel_record(
     return matched
 
 
-def mime_type_for_image(path: Path) -> str:
-    mime_type = mimetypes.guess_type(path.name)[0]
-    if mime_type not in {
-        "image/bmp",
-        "image/jpeg",
-        "image/png",
-        "image/webp",
-    }:
+def normalize_image_frame(frame: Image.Image) -> Image.Image:
+    normalized = ImageOps.exif_transpose(frame)
+    if normalized.mode == "P":
+        return normalized.convert(
+            "RGBA" if "transparency" in normalized.info else "RGB"
+        )
+    if normalized.mode in {"1", "L", "LA", "RGB", "RGBA"}:
+        return normalized
+    return normalized.convert("RGB")
+
+
+def prepare_pdf_parts(path: Path) -> List[Tuple[str, bytes, str]]:
+    try:
+        document = pymupdf.open(path)
+    except Exception as exc:
+        raise ValueError(f"无法读取 PDF 文件: {path}，{exc}") from exc
+    try:
+        if document.needs_pass:
+            raise ValueError(f"PDF 已加密，需要先移除密码: {path}")
+        page_count = document.page_count
+        if page_count < 1:
+            raise ValueError(f"PDF 没有可识别页面: {path}")
+        if page_count > MAX_IMAGE_FRAMES_PER_FILE:
+            raise ValueError(
+                f"PDF 页数过多: {path.name} 共 {page_count} 页，"
+                f"最多支持 {MAX_IMAGE_FRAMES_PER_FILE} 页"
+            )
+        parts: List[Tuple[str, bytes, str]] = []
+        for page_index in range(page_count):
+            page = document.load_page(page_index)
+            pixmap = page.get_pixmap(dpi=PDF_RENDER_DPI, alpha=False)
+            parts.append(
+                (
+                    f"{path.name}（第{page_index + 1}页）",
+                    pixmap.tobytes("png"),
+                    "image/png",
+                )
+            )
+        return parts
+    finally:
+        document.close()
+
+
+def prepare_image_parts(
+    path: Path,
+) -> List[Tuple[str, bytes, str]]:
+    suffix = path.suffix.lower()
+    direct_mime_type = DIRECT_IMAGE_MIME_TYPES.get(suffix)
+    if direct_mime_type:
+        return [(path.name, path.read_bytes(), direct_mime_type)]
+    if suffix in PDF_SUFFIXES:
+        return prepare_pdf_parts(path)
+    if suffix not in CONVERTED_IMAGE_SUFFIXES:
         raise ValueError(f"不支持的图片格式: {path}")
-    return mime_type
+
+    try:
+        with Image.open(path) as image:
+            frame_count = int(getattr(image, "n_frames", 1) or 1)
+            if frame_count > MAX_IMAGE_FRAMES_PER_FILE:
+                raise ValueError(
+                    f"图片页数过多: {path.name} 共 {frame_count} 页，"
+                    f"最多支持 {MAX_IMAGE_FRAMES_PER_FILE} 页"
+                )
+            parts: List[Tuple[str, bytes, str]] = []
+            for frame_index in range(frame_count):
+                image.seek(frame_index)
+                frame = normalize_image_frame(image.copy())
+                buffer = io.BytesIO()
+                frame.save(buffer, format="PNG", optimize=True)
+                label = (
+                    path.name
+                    if frame_count == 1
+                    else f"{path.name}（第{frame_index + 1}页）"
+                )
+                parts.append((label, buffer.getvalue(), "image/png"))
+            return parts
+    except UnidentifiedImageError as exc:
+        raise ValueError(f"无法读取图片文件: {path}") from exc
+    except OSError as exc:
+        raise ValueError(f"转换图片失败: {path}，{exc}") from exc
 
 
 def build_extraction_prompt(
@@ -422,20 +538,21 @@ def build_image_input(
 ) -> List[Dict[str, Any]]:
     items: List[Dict[str, Any]] = [{"type": "text", "text": prompt}]
     for image_path in image_paths:
-        items.append(
-            {
-                "type": "text",
-                "text": f"图片文件名：{image_path.name}",
-            }
-        )
-        items.append(
-            {
-                "type": "image",
-                "data": base64.b64encode(image_path.read_bytes()).decode("ascii"),
-                "mime_type": mime_type_for_image(image_path),
-                "resolution": "high",
-            }
-        )
+        for label, image_bytes, mime_type in prepare_image_parts(image_path):
+            items.append(
+                {
+                    "type": "text",
+                    "text": f"图片文件名：{label}",
+                }
+            )
+            items.append(
+                {
+                    "type": "image",
+                    "data": base64.b64encode(image_bytes).decode("ascii"),
+                    "mime_type": mime_type,
+                    "resolution": "high",
+                }
+            )
     return items
 
 

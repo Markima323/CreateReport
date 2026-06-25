@@ -275,14 +275,26 @@ def normalize_ethnicity(value: Any) -> str:
 
 def extract_floor(address: str) -> str:
     marker = address.rfind("室")
-    if marker < 0:
-        raise ValueError(f"地址无法提取楼层，未找到“室”: {address}")
-    before_room = address[:marker].strip()
-    match = re.search(r"(\d+(?:-\d+)?)\s*$", before_room)
-    if not match:
-        raise ValueError(f"地址无法提取楼层，室号不明确: {address}")
-    room_token = match.group(1)
-    room = room_token.split("-")[-1]
+    if marker >= 0:
+        before_room = address[:marker].strip()
+        match = re.search(r"(\d+(?:[-－—]\d+)?)\s*$", before_room)
+        if not match:
+            raise ValueError(f"地址无法提取楼层，室号不明确: {address}")
+        room = re.split(r"[-－—]", match.group(1))[-1]
+    else:
+        match = re.search(
+            r"(?:"
+            r"[-－—]\s*"
+            r"|(?:幢|栋|座|号楼|单元)\s*"
+            r")(\d{3,5})\s*$",
+            address,
+        )
+        if not match:
+            raise ValueError(
+                "地址无法提取楼层，末尾没有明确的室号或“楼栋-房号”结构: "
+                f"{address}"
+            )
+        room = match.group(1)
     if len(room) < 3:
         raise ValueError(f"地址无法提取楼层，房号位数不足: {address}")
     floor = int(room) // 100

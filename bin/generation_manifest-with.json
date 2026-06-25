@@ -1,0 +1,32 @@
+{
+  "document_type": "1",
+  "template": "C:\\Users\\AA\\AppData\\Local\\Temp\\_MEI155962\\resources\\report_template.docx",
+  "prompt": "C:\\Users\\AA\\AppData\\Local\\Temp\\_MEI155962\\resources\\report_prompt.md",
+  "rules": "C:\\Users\\AA\\AppData\\Local\\Temp\\_MEI155962\\resources\\report_rules.json",
+  "guarantors_file": "D:\\AA\\Desktop\\程序1\\bin\\json\\保证人资料.json",
+  "records_file": "D:\\AA\\Desktop\\程序1\\bin\\json\\当前人员数据.json",
+  "source_type": "image_folders_with_excel",
+  "ai": {
+    "provider": "Google Gemini",
+    "model": "gemini-3.5-flash",
+    "api": "Interactions API",
+    "enabled": false,
+    "store_interactions": false
+  },
+  "template_field_counts": {
+    "fldChar": 96,
+    "TOC": 1,
+    "PAGEREF": 17,
+    "PAGE": 2
+  },
+  "reports": [],
+  "errors": [
+    {
+      "row_number": 1,
+      "sequence": "2",
+      "name": "雷茜麟",
+      "output_status": "error",
+      "error": "地址无法提取楼层，未找到“室”: 江苏省苏州市吴江区邻水湾景苑7-902"
+    }
+  ]
+}

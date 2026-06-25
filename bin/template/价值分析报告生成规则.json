@@ -7,6 +7,12 @@
     "folder_pattern": "序号-支行-姓名",
     "minimum_images_per_folder": 2,
     "allow_more_images": true,
+    "image_formats": {
+      "gemini_native": ["jpg", "jpeg", "jfif", "png", "webp", "heic", "heif"],
+      "convert_to_png": ["tif", "tiff", "bmp", "dib", "gif", "ico", "avif", "tga", "pcx", "ppm", "pgm", "pbm"],
+      "pdf": "使用 200 DPI 逐页转换为 PNG 后发送",
+      "multi_page_files": "PDF 和多页 TIFF 逐页发送，每个文件最多 50 页"
+    },
     "excel_file": "InputPic 根目录内唯一的 .xlsx 或 .xlsm 文件",
     "excel_match": "姓名精确匹配，序号与支行用于校验和消歧",
     "excel_precedence": "Excel 非空字段覆盖图片识别与补充 JSON 的同名字段",
@@ -108,12 +114,14 @@
   },
   "floor_rule": {
     "source": "地址",
-    "algorithm": "取最后一个室之前的最终房号；通常 floor = int(room_number) // 100",
+    "algorithm": "优先取最后一个室之前的最终房号；无室字时，仅接受地址末尾明确的楼栋-房号、幢/栋/座/号楼/单元+房号结构；通常 floor = int(room_number) // 100",
     "examples": {
       "406室": "4层",
       "603室": "6层",
       "1901室": "19层",
-      "3-402室": "4层"
+      "3-402室": "4层",
+      "邻水湾景苑7-902": "9层",
+      "邻水湾景苑7幢902": "9层"
     },
     "ambiguous_action": "error_or_explicit_override"
   },
