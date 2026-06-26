@@ -1646,7 +1646,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "rules": str(rules_file),
         "guarantors_file": str(guarantors_file),
         "records_file": str(records_file),
-        "source_type": "image_folders_with_excel",
+        "source_type": "report_folders_with_images_and_excel",
         "ai": {
             "provider": "Google Gemini",
             "model": model,

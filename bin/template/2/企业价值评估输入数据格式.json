@@ -80,6 +80,16 @@
       "content_summary": [],
       "location_summary": [],
       "detail_headers": [],
+      "detail_table": {
+        "subject": "",
+        "sheet": "",
+        "headers": [],
+        "rows": [
+          []
+        ],
+        "row_count": 0,
+        "warnings": []
+      },
       "representative_rows": [],
       "source_workpaper_files": [],
       "actual_valuation_method": "",

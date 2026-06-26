@@ -4,6 +4,8 @@
   "name": "企业价值评估报告及评估说明",
   "enabled": true,
   "source_type": "valuation_project_folder",
+  "input_root": "Input/2",
+  "batch_layout": "Input/2 的每个直接子文件夹是一份独立报告项目",
   "resources": {
     "report_template": "企业价值评估报告-自动生成基底模板.docx",
     "explanation_template": "企业价值评估说明-自动生成基底模板.docx",
@@ -31,6 +33,39 @@
       ]
     }
   ],
+  "programmatic_section_fallbacks": {
+    "scope": true,
+    "method_sections": true,
+    "conclusion": true,
+    "physical_assets": true,
+    "technical_sections": true,
+    "description": "类型2 Word 渲染前会用 Excel JSON 和方法库补全对象报告式章节。Gemini 原始输出保存在 gemini_generated_sections，generated_sections 为最终用于 Word 的增强结果。"
+  },
+  "detail_tables": {
+    "enabled": true,
+    "source": "母公司评估明细表中的可见科目工作表",
+    "preserve_all_rows": true,
+    "send_to_ai": false,
+    "insert_in_report_scope": true,
+    "insert_in_explanation_technical": true,
+    "report_scope_subjects": [
+      "长期股权投资",
+      "房屋建筑物",
+      "土地使用权"
+    ],
+    "explanation_technical_subjects": [
+      "长期股权投资",
+      "房屋建筑物",
+      "土地使用权"
+    ],
+    "max_rows_per_detail_table": 300,
+    "formatting": "Word 中使用 Table Grid；完整明细表采用轻量渲染，避免逐格设置字体导致生成过慢。",
+    "notes": [
+      "日期列由 Excel 序列号转换为中文日期。",
+      "金额、价值、原值、净值、面积、数量等列保留两位小数。",
+      "账号、号码、编号、证号、权证等列若 Excel 单元格本身为文本则可保真；若源 Excel 以超长数字存储，Excel 本身可能已丢失精度，应将源列改为文本格式。"
+    ]
+  },
   "input_discovery": {
     "ignore_names": [
       "~$*"

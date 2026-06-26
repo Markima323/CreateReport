@@ -2,8 +2,8 @@
   "schema_version": "1.0",
   "template": "价值分析报告-自动生成基底模板.docx",
   "input": {
-    "source_type": "image_folders_with_excel",
-    "root": "InputPic",
+    "source_type": "report_folders_with_images_and_excel",
+    "root": "Input/1",
     "folder_pattern": "序号-支行-姓名",
     "minimum_images_per_folder": 2,
     "allow_more_images": true,
@@ -13,7 +13,7 @@
       "pdf": "使用 200 DPI 逐页转换为 PNG 后发送",
       "multi_page_files": "PDF 和多页 TIFF 逐页发送，每个文件最多 50 页"
     },
-    "excel_file": "InputPic 根目录内唯一的 .xlsx 或 .xlsm 文件",
+    "excel_file": "每个人员文件夹内唯一的 .xlsx 或 .xlsm 文件；为兼容旧数据，人员文件夹没有 Excel 时可回退到 Input/1 根目录唯一的 Excel",
     "excel_match": "姓名精确匹配，序号与支行用于校验和消歧",
     "excel_precedence": "Excel 非空字段覆盖图片识别与补充 JSON 的同名字段",
     "records_output": "bin/json/图片提取数据.json",

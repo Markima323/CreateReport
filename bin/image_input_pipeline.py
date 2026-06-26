@@ -207,14 +207,28 @@ def list_person_folders(input_dir: Path) -> List[Path]:
     if not input_dir.is_dir():
         raise FileNotFoundError(f"图片输入目录不存在: {input_dir}")
     folders = sorted(
-        (path for path in input_dir.iterdir() if path.is_dir()),
+        (
+            path
+            for path in input_dir.iterdir()
+            if path.is_dir()
+            and re.fullmatch(r"\s*\d+-.+?-.+?\s*", path.name)
+            and any(
+                item.is_file()
+                and item.suffix.lower() in SUPPORTED_IMAGE_SUFFIXES
+                for item in path.iterdir()
+            )
+        ),
         key=lambda path: (
             int(parse_folder_name(path.name)[0]),
             path.name,
         ),
     )
     if not folders:
-        raise ValueError(f"图片输入目录中没有人员子文件夹: {input_dir}")
+        raise ValueError(
+            "输入根目录中没有类型 1 人员子文件夹；"
+            "文件夹应按“序号-支行-姓名”命名并包含图片: "
+            f"{input_dir}"
+        )
     return folders
 
 
@@ -245,23 +259,30 @@ def list_images(folder: Path) -> List[Path]:
     return images
 
 
-def find_input_workbook(input_dir: Path) -> Path:
+def find_input_workbook(
+    report_dir: Path,
+    fallback_dir: Optional[Path] = None,
+) -> Path:
     workbooks = sorted(
         path
-        for path in input_dir.iterdir()
+        for path in report_dir.iterdir()
         if (
             path.is_file()
             and not path.name.startswith("~$")
             and path.suffix.lower() in SUPPORTED_EXCEL_SUFFIXES
         )
     )
+    if not workbooks and fallback_dir is not None:
+        fallback_dir = fallback_dir.resolve()
+        if fallback_dir != report_dir.resolve():
+            return find_input_workbook(fallback_dir)
     if not workbooks:
         raise FileNotFoundError(
-            f"图片输入目录根目录中未找到 Excel 文件（.xlsx/.xlsm）: {input_dir}"
+            f"报告数据文件夹中未找到 Excel 文件（.xlsx/.xlsm）: {report_dir}"
         )
     if len(workbooks) > 1:
         raise ValueError(
-            "图片输入目录根目录中存在多个 Excel 文件，请只保留一个: "
+            f"报告数据文件夹中存在多个 Excel 文件，请只保留一个（{report_dir}）: "
             + ", ".join(path.name for path in workbooks)
         )
     return workbooks[0]
@@ -783,8 +804,6 @@ def extract_input_directory(
 ) -> Dict[str, Any]:
     client = create_gemini_client(api_key)
     supplements = load_supplements(supplements_file)
-    workbook_file = find_input_workbook(input_dir)
-    excel_records: Optional[List[Dict[str, Any]]] = None
     records: List[Dict[str, Any]] = []
     errors: List[Dict[str, Any]] = []
     if only_folder is not None:
@@ -796,10 +815,14 @@ def extract_input_directory(
     else:
         folders = list_person_folders(input_dir)
     print(f"发现人员文件夹: {len(folders)}")
-    print(f"Excel 数据源: {workbook_file.name}")
+    workbook_files: List[str] = []
     for index, folder in enumerate(folders, start=1):
         print(f"[{index}/{len(folders)}] 提取图片: {folder.name}")
         try:
+            workbook_file = find_input_workbook(folder, fallback_dir=input_dir)
+            workbook_files.append(str(workbook_file))
+            excel_records = load_excel_records(workbook_file)
+            print(f"  Excel 数据源: {workbook_file}")
             extraction = extract_folder_images(
                 client=client,
                 model=model,
@@ -808,8 +831,6 @@ def extract_input_directory(
                 store_interactions=store_interactions,
             )
             print(f"  图片识别完成，开始匹配 Excel: {workbook_file.name}")
-            if excel_records is None:
-                excel_records = load_excel_records(workbook_file)
             excel_match = match_excel_record(
                 excel_records,
                 extraction["sequence"],
@@ -859,9 +880,9 @@ def extract_input_directory(
 
     result = {
         "schema_version": "2.0",
-        "source_type": "image_folders_with_excel",
+        "source_type": "report_folders_with_images_and_excel",
         "source_root": str(input_dir),
-        "excel_file": str(workbook_file),
+        "excel_files": sorted(set(workbook_files)),
         "generated_at": datetime.now().isoformat(timespec="seconds"),
         "model": model,
         "records": records,
@@ -878,7 +899,7 @@ def build_parser(project_root: Path) -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--input-dir",
-        default=str(project_root / "InputPic"),
+        default=str(project_root / "Input" / "1"),
     )
     parser.add_argument(
         "--folder",

@@ -57,7 +57,7 @@ TYPE2_RESOURCE_DIR = RESOURCE_ROOT / "2"
 PROCESS_SCRIPT = BIN_DIR / "process_excel_to_word.py"
 IMAGE_PIPELINE_SCRIPT = BIN_DIR / "image_input_pipeline.py"
 TYPE2_PROCESS_SCRIPT = BIN_DIR / "type2_report_pipeline.py"
-DEFAULT_INPUT_DIR = PROJECT_ROOT / "InputPic"
+DEFAULT_INPUT_DIR = PROJECT_ROOT / "Input"
 JSON_DIR = BIN_DIR / "json"
 DEFAULT_RECORDS_FILE = JSON_DIR / "图片提取数据.json"
 CURRENT_RECORDS_FILE = JSON_DIR / "当前人员数据.json"
@@ -148,11 +148,16 @@ class ReportGeneratorApp:
         self.person_folders: list[Path] = []
         self.current_person_folder: Path | None = None
         self.input_workbook: Path | None = None
+        self.type2_project_folders: list[Path] = []
+        self.current_type2_project_folder: Path | None = None
+        self.total_type2_project_count = 0
+        self.completed_type2_project_count = 0
         self.total_person_count = 0
         self.completed_person_count = 0
         self.batch_records: list[dict] = []
         self.batch_reports: list[dict] = []
         self.batch_errors: list[dict] = []
+        self.batch_warnings: list[dict] = []
         self.batch_manifest_base: dict = {}
         self.pending_guarantors: list[str] = []
         self.current_guarantor = ""
@@ -161,9 +166,15 @@ class ReportGeneratorApp:
         self.guarantor_status_var = tk.StringVar(value="")
         self.extraction_in_progress = False
         self._path_entries: list[tk.Entry] = []
-        self.input_dir_var = tk.StringVar(
-            value=str(self.saved_settings.get("input_dir") or DEFAULT_INPUT_DIR)
-        )
+        saved_input_dir = str(self.saved_settings.get("input_dir") or "").strip()
+        old_default_input = (PROJECT_ROOT / "InputPic").resolve()
+        try:
+            saved_input_path = Path(saved_input_dir).expanduser().resolve()
+        except OSError:
+            saved_input_path = DEFAULT_INPUT_DIR.resolve()
+        if not saved_input_dir or saved_input_path == old_default_input:
+            saved_input_path = DEFAULT_INPUT_DIR.resolve()
+        self.input_dir_var = tk.StringVar(value=str(saved_input_path))
         self.output_var = tk.StringVar(
             value=str(self.saved_settings.get("output_dir") or DEFAULT_OUTPUT)
         )
@@ -368,7 +379,7 @@ class ReportGeneratorApp:
         self.input_dir_label = self._path_row(
             settings,
             0,
-            "图片数据目录",
+            "输入根目录",
             self.input_dir_var,
             self._select_input_dir,
         )
@@ -593,12 +604,7 @@ class ReportGeneratorApp:
             self.input_dir_var.set(str(directory.resolve()))
 
     def _select_input_dir(self) -> None:
-        title = (
-            "选择图片数据根目录"
-            if self.document_type_var.get() == "1"
-            else "选择企业价值评估项目目录"
-        )
-        path = filedialog.askdirectory(title=title)
+        path = filedialog.askdirectory(title="选择 Input 输入根目录")
         if path:
             self.input_dir_var.set(path)
 
@@ -610,17 +616,23 @@ class ReportGeneratorApp:
     def _toggle_key_visibility(self) -> None:
         self.api_key_entry.configure(show="" if self.show_key_var.get() else "*")
 
+    def _document_input_dir(self, document_type: str | None = None) -> Path:
+        selected = Path(self.input_dir_var.get()).expanduser().resolve()
+        document_type = document_type or self.document_type_var.get()
+        if selected.name in {"1", "2"}:
+            return selected.parent / document_type
+        return selected / document_type
+
     def _on_document_type_changed(self) -> None:
         self._apply_document_type()
         if self.document_type_var.get() == "1":
             self.type_note.configure(text="类型 1：当前价值分析报告", fg=TEXT_MID)
-            self.input_dir_label.configure(text="图片数据目录")
         else:
             self.type_note.configure(
                 text="类型 2：企业价值评估报告及评估说明",
                 fg=TEXT_MID,
             )
-            self.input_dir_label.configure(text="评估项目目录")
+        self.input_dir_label.configure(text="输入根目录")
         self._refresh_state()
 
     def _append_log(self, text: str) -> None:
@@ -658,22 +670,331 @@ class ReportGeneratorApp:
             explanation_template = Path(config["explanation_template"])
             if not explanation_template.is_file():
                 return False, f"评估说明模板不存在：\n{explanation_template}"
-        input_dir = Path(self.input_dir_var.get()).expanduser()
+        input_root = Path(self.input_dir_var.get()).expanduser()
+        if not input_root.is_dir():
+            return False, f"输入根目录不存在：\n{self.input_dir_var.get()}"
+        input_dir = self._document_input_dir(document_type)
         if not input_dir.is_dir():
-            return False, f"输入目录不存在：\n{self.input_dir_var.get()}"
+            return False, (
+                f"文档类型 {document_type} 的输入目录不存在：\n"
+                f"{input_dir}"
+            )
         if document_type == "1":
             try:
-                image_pipeline.find_input_workbook(input_dir.resolve())
+                folders = list_person_folders(input_dir.resolve())
+                for folder in folders:
+                    image_pipeline.find_input_workbook(
+                        folder,
+                        fallback_dir=input_dir.resolve(),
+                    )
             except Exception as exc:
                 return False, str(exc)
         else:
             try:
-                type2_pipeline.discover_excel_files(input_dir.resolve())
+                type2_pipeline.discover_project_folders(input_dir.resolve())
             except Exception as exc:
                 return False, str(exc)
         if not self.api_key_var.get().strip():
             return False, "请填写 Gemini API Key。"
         return True, ""
+
+    def _format_selectable_input_item(
+        self,
+        input_dir: Path,
+        folder: Path,
+    ) -> str:
+        try:
+            return str(folder.resolve().relative_to(input_dir.resolve()))
+        except ValueError:
+            return folder.name
+
+    def _choose_processing_items(
+        self,
+        document_type: str,
+        folders: list[Path],
+    ) -> list[Path] | None:
+        if not folders:
+            return []
+
+        input_dir = self._document_input_dir(document_type)
+        dialog = tk.Toplevel(self.root)
+        dialog.title(f"选择类型 {document_type} 处理项目")
+        dialog.geometry("760x560")
+        dialog.minsize(640, 420)
+        dialog.configure(bg=WINDOW_BG)
+        dialog.transient(self.root)
+        dialog.grab_set()
+
+        result: dict[str, list[Path] | None] = {"folders": None}
+        selected = set(range(len(folders)))
+        row_height = 34
+        drag_state: dict[str, object] = {
+            "start": None,
+            "rect": None,
+            "dragging": False,
+        }
+
+        container = tk.Frame(dialog, bg=WINDOW_BG, padx=22, pady=18)
+        container.pack(fill="both", expand=True)
+        container.columnconfigure(0, weight=1)
+        container.rowconfigure(2, weight=1)
+
+        tk.Label(
+            container,
+            text="选择本次要处理的数据文件夹",
+            font=("Microsoft YaHei UI", 13, "bold"),
+            bg=WINDOW_BG,
+            fg=TEXT_DARK,
+            anchor="w",
+        ).grid(row=0, column=0, sticky="w")
+        note_var = tk.StringVar()
+        tk.Label(
+            container,
+            textvariable=note_var,
+            font=("Microsoft YaHei UI", 9),
+            bg=WINDOW_BG,
+            fg=TEXT_MID,
+            anchor="w",
+        ).grid(row=1, column=0, sticky="ew", pady=(4, 12))
+
+        list_frame = tk.Frame(
+            container,
+            bg=PANEL_BG,
+            highlightbackground=BORDER,
+            highlightthickness=1,
+        )
+        list_frame.grid(row=2, column=0, sticky="nsew")
+        list_frame.columnconfigure(0, weight=1)
+        list_frame.rowconfigure(0, weight=1)
+
+        canvas = tk.Canvas(
+            list_frame,
+            bg=INPUT_BG,
+            highlightthickness=0,
+            bd=0,
+            selectbackground=GREEN,
+        )
+        canvas.grid(row=0, column=0, sticky="nsew")
+        scrollbar = tk.Scrollbar(list_frame, command=canvas.yview)
+        scrollbar.grid(row=0, column=1, sticky="ns")
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        def update_note() -> None:
+            note_var.set(
+                f"已选择 {len(selected)} / {len(folders)} 项。"
+                "按住鼠标左键拖动可框选。"
+            )
+
+        def redraw() -> None:
+            canvas.delete("row")
+            width = max(canvas.winfo_width(), 620)
+            height = max(len(folders) * row_height, canvas.winfo_height())
+            canvas.configure(scrollregion=(0, 0, width, height))
+            for index, folder in enumerate(folders):
+                y = index * row_height
+                is_selected = index in selected
+                fill = "#EAF2EC" if is_selected else INPUT_BG
+                canvas.create_rectangle(
+                    0,
+                    y,
+                    width,
+                    y + row_height,
+                    fill=fill,
+                    outline=BORDER,
+                    tags=("row",),
+                )
+                box_x = 12
+                box_y = y + 9
+                canvas.create_rectangle(
+                    box_x,
+                    box_y,
+                    box_x + 15,
+                    box_y + 15,
+                    outline=GREEN,
+                    width=1,
+                    fill=PANEL_BG,
+                    tags=("row",),
+                )
+                if is_selected:
+                    canvas.create_line(
+                        box_x + 3,
+                        box_y + 8,
+                        box_x + 7,
+                        box_y + 12,
+                        box_x + 13,
+                        box_y + 4,
+                        fill=GREEN,
+                        width=2,
+                        tags=("row",),
+                    )
+                display = self._format_selectable_input_item(input_dir, folder)
+                canvas.create_text(
+                    38,
+                    y + row_height / 2,
+                    text=f"{index + 1:02d}  {display}",
+                    anchor="w",
+                    fill=TEXT_DARK,
+                    font=("Microsoft YaHei UI", 10),
+                    tags=("row",),
+                )
+            update_note()
+
+        def set_all(value: bool) -> None:
+            selected.clear()
+            if value:
+                selected.update(range(len(folders)))
+            redraw()
+
+        def row_at(y_value: float) -> int | None:
+            index = int(y_value // row_height)
+            if 0 <= index < len(folders):
+                return index
+            return None
+
+        def on_press(event: tk.Event) -> None:
+            drag_state["start"] = (
+                canvas.canvasx(event.x),
+                canvas.canvasy(event.y),
+            )
+            drag_state["dragging"] = False
+            rect = drag_state.get("rect")
+            if rect is not None:
+                canvas.delete(rect)
+                drag_state["rect"] = None
+
+        def on_motion(event: tk.Event) -> None:
+            start = drag_state.get("start")
+            if not isinstance(start, tuple):
+                return
+            x0, y0 = start
+            x1 = canvas.canvasx(event.x)
+            y1 = canvas.canvasy(event.y)
+            if abs(x1 - x0) < 4 and abs(y1 - y0) < 4:
+                return
+            drag_state["dragging"] = True
+            rect = drag_state.get("rect")
+            if rect is None:
+                rect = canvas.create_rectangle(
+                    x0,
+                    y0,
+                    x1,
+                    y1,
+                    outline=RUST,
+                    dash=(4, 3),
+                    width=2,
+                )
+                drag_state["rect"] = rect
+            else:
+                canvas.coords(rect, x0, y0, x1, y1)
+
+        def on_release(event: tk.Event) -> None:
+            start = drag_state.get("start")
+            if not isinstance(start, tuple):
+                return
+            x0, y0 = start
+            x1 = canvas.canvasx(event.x)
+            y1 = canvas.canvasy(event.y)
+            rect = drag_state.get("rect")
+            if rect is not None:
+                canvas.delete(rect)
+                drag_state["rect"] = None
+            if drag_state.get("dragging"):
+                top, bottom = sorted((y0, y1))
+                boxed = {
+                    index
+                    for index in range(len(folders))
+                    if index * row_height <= bottom
+                    and (index + 1) * row_height >= top
+                }
+                if event.state & 0x0004:
+                    selected.update(boxed)
+                else:
+                    selected.clear()
+                    selected.update(boxed)
+            else:
+                index = row_at(canvas.canvasy(event.y))
+                if index is not None:
+                    if index in selected:
+                        selected.remove(index)
+                    else:
+                        selected.add(index)
+            drag_state["start"] = None
+            drag_state["dragging"] = False
+            redraw()
+
+        def on_mousewheel(event: tk.Event) -> None:
+            delta = -1 if event.delta > 0 else 1
+            canvas.yview_scroll(delta * 3, "units")
+
+        def confirm() -> None:
+            if not selected:
+                messagebox.showwarning(
+                    "未选择项目",
+                    "请至少选择一个要处理的数据文件夹。",
+                    parent=dialog,
+                )
+                return
+            result["folders"] = [folders[index] for index in sorted(selected)]
+            dialog.destroy()
+
+        def cancel() -> None:
+            result["folders"] = None
+            dialog.destroy()
+
+        canvas.bind("<Configure>", lambda _event: redraw())
+        canvas.bind("<ButtonPress-1>", on_press)
+        canvas.bind("<B1-Motion>", on_motion)
+        canvas.bind("<ButtonRelease-1>", on_release)
+        canvas.bind("<MouseWheel>", on_mousewheel)
+        dialog.bind("<Return>", lambda _event: confirm())
+        dialog.bind("<Escape>", lambda _event: cancel())
+        dialog.protocol("WM_DELETE_WINDOW", cancel)
+
+        actions = tk.Frame(container, bg=WINDOW_BG)
+        actions.grid(row=3, column=0, sticky="ew", pady=(14, 0))
+        actions.columnconfigure(0, weight=1)
+        left_actions = tk.Frame(actions, bg=WINDOW_BG)
+        left_actions.grid(row=0, column=0, sticky="w")
+        self._button(
+            left_actions,
+            "全选",
+            lambda: set_all(True),
+            GRAY_BUTTON,
+            GRAY_ACTIVE,
+            padx=14,
+            pady=7,
+        ).pack(side="left")
+        self._button(
+            left_actions,
+            "取消全选",
+            lambda: set_all(False),
+            GRAY_BUTTON,
+            GRAY_ACTIVE,
+            padx=14,
+            pady=7,
+        ).pack(side="left", padx=(10, 0))
+        self._button(
+            actions,
+            "取消",
+            cancel,
+            GRAY_BUTTON,
+            GRAY_ACTIVE,
+            padx=14,
+            pady=7,
+        ).grid(row=0, column=1, padx=(0, 10), sticky="e")
+        self._button(
+            actions,
+            "开始处理",
+            confirm,
+            RUST,
+            RUST_ACTIVE,
+            padx=18,
+            pady=7,
+        ).grid(row=0, column=2, sticky="e")
+
+        redraw()
+        dialog.wait_window()
+        return result["folders"]
 
     def _save_api_key(self) -> None:
         if self.save_key_var.get():
@@ -1115,12 +1436,17 @@ class ReportGeneratorApp:
             return
 
         try:
-            input_dir = Path(self.input_dir_var.get()).expanduser().resolve()
+            input_dir = self._document_input_dir("1")
             self.person_folders = list_person_folders(input_dir)
-            self.input_workbook = image_pipeline.find_input_workbook(input_dir)
+            self.input_workbook = None
         except Exception as exc:
             messagebox.showerror("读取图片目录失败", str(exc))
             return
+        selected_folders = self._choose_processing_items("1", self.person_folders)
+        if selected_folders is None:
+            self.status_var.set("已取消选择")
+            return
+        self.person_folders = selected_folders
 
         self.processing = True
         self.total_person_count = len(self.person_folders)
@@ -1130,6 +1456,7 @@ class ReportGeneratorApp:
         self.batch_records = []
         self.batch_reports = []
         self.batch_errors = []
+        self.batch_warnings = []
         self.batch_manifest_base = {}
         self._write_batch_records()
         self.status_var.set("准备串行生成")
@@ -1139,18 +1466,59 @@ class ReportGeneratorApp:
             "将按“图片提取 → Excel 匹配覆盖 → Word 完成 → 下一人”"
             "串行处理。"
         )
-        self._append_log(f"Excel 数据源：{self.input_workbook}")
         self._start_next_person()
 
     def _start_type2_generation(self) -> None:
+        input_root = self._document_input_dir("2")
+        try:
+            self.type2_project_folders = (
+                type2_pipeline.discover_project_folders(input_root)
+            )
+        except Exception as exc:
+            messagebox.showerror("读取类型 2 输入目录失败", str(exc))
+            return
+        selected_folders = self._choose_processing_items(
+            "2",
+            self.type2_project_folders,
+        )
+        if selected_folders is None:
+            self.status_var.set("已取消选择")
+            return
+        self.type2_project_folders = selected_folders
         self.processing = True
-        self.status_var.set("正在提取类型 2 项目数据")
+        self.total_type2_project_count = len(self.type2_project_folders)
+        self.completed_type2_project_count = 0
+        self.current_type2_project_folder = None
+        self.batch_reports = []
+        self.batch_errors = []
+        self.batch_warnings = []
+        self.batch_manifest_base = {}
+        self.status_var.set("准备串行生成类型 2")
         self._refresh_state()
         self._append_log(
-            "开始类型 2 流程：评估明细表与工作底稿提取 → "
-            "Gemini 生成章节 → 输出评估报告和评估说明。"
+            f"发现类型 2 项目文件夹: {self.total_type2_project_count}。"
+            "每个项目完成 Excel 提取、Gemini 生成和两份 Word 后，"
+            "再处理下一个项目。"
         )
-        arguments = self._build_type2_arguments()
+        self._start_next_type2_project()
+
+    def _start_next_type2_project(self) -> None:
+        if not self.type2_project_folders:
+            self._finish_type2_batch_success()
+            return
+        self.current_type2_project_folder = self.type2_project_folders.pop(0)
+        project_number = self.completed_type2_project_count + 1
+        self.status_var.set(
+            f"正在处理类型 2 项目 "
+            f"{project_number}/{self.total_type2_project_count}"
+        )
+        self._append_log(
+            f"[{project_number}/{self.total_type2_project_count}] "
+            f"开始类型 2 项目：{self.current_type2_project_folder.name}"
+        )
+        arguments = self._build_type2_arguments(
+            self.current_type2_project_folder
+        )
         command = [
             str(self._console_python()),
             "-X",
@@ -1165,15 +1533,20 @@ class ReportGeneratorApp:
         )
         worker.start()
 
-    def _build_type2_arguments(self) -> list[str]:
+    def _build_type2_arguments(self, project_folder: Path) -> list[str]:
         config = DOCUMENT_TYPE_CONFIG["2"]
+        records_dir = JSON_DIR / "类型2项目数据"
+        records_name = (
+            type2_pipeline.sanitize_filename_part(project_folder.name)
+            + ".json"
+        )
         return [
             "--input-dir",
-            str(Path(self.input_dir_var.get()).expanduser().resolve()),
+            str(project_folder.resolve()),
             "--word-dir",
             str(Path(self.output_var.get()).expanduser().resolve()),
             "--records-file",
-            str(TYPE2_RECORDS_FILE),
+            str(records_dir / records_name),
             "--report-template",
             str(Path(config["template"]).resolve()),
             "--explanation-template",
@@ -1228,20 +1601,103 @@ class ReportGeneratorApp:
             self.root.after(0, self._finish_generation_error, str(exc))
 
     def _finish_type2_generation(self, return_code: int) -> None:
-        self.processing = False
-        self._refresh_state()
         if return_code == 0:
-            self.status_var.set("类型 2 生成完成")
-            self._append_log("类型 2 的评估报告和评估说明已生成。")
-            messagebox.showinfo(
-                "生成完成",
-                "评估报告和评估说明已生成。\n"
-                f"输出目录：\n{self.output_var.get()}",
+            try:
+                self._capture_type2_results()
+            except Exception as exc:
+                self.status_var.set("汇总类型 2 项目结果失败")
+                self._stop_batch()
+                messagebox.showerror("汇总失败", str(exc))
+                return
+            self.completed_type2_project_count += 1
+            current_name = (
+                self.current_type2_project_folder.name
+                if self.current_type2_project_folder is not None
+                else "当前项目"
+            )
+            self._append_log(
+                f"类型 2 项目已完成：{current_name} "
+                f"({self.completed_type2_project_count}/"
+                f"{self.total_type2_project_count})"
+            )
+            self.current_type2_project_folder = None
+            self.status_var.set("等待下一个类型 2 项目")
+            self.root.after(
+                SERIAL_NEXT_DELAY_MS,
+                self._start_next_type2_project,
             )
             return
         self.status_var.set("类型 2 生成失败")
         self._append_log(f"类型 2 生成失败，退出代码：{return_code}")
+        self._stop_batch()
         messagebox.showerror("生成失败", "请查看面板中的运行日志。")
+
+    def _capture_type2_results(self) -> None:
+        output_dir = Path(self.output_var.get()).expanduser().resolve()
+        manifest_file = output_dir / "generation_manifest.json"
+        manifest = json.loads(
+            manifest_file.read_text(encoding="utf-8-sig")
+        )
+        project_name = (
+            self.current_type2_project_folder.name
+            if self.current_type2_project_folder is not None
+            else ""
+        )
+        for report in manifest.get("reports") or []:
+            report_item = dict(report)
+            report_item["project_folder"] = project_name
+            self.batch_reports.append(report_item)
+        for warning in manifest.get("warnings") or []:
+            self.batch_warnings.append(
+                {
+                    "project_folder": project_name,
+                    "output_status": "warning",
+                    "warning": str(warning),
+                }
+            )
+        for error in manifest.get("errors") or []:
+            error_item = dict(error)
+            error_item["project_folder"] = project_name
+            self.batch_errors.append(error_item)
+        self._write_type2_batch_manifest()
+
+    def _write_type2_batch_manifest(self) -> None:
+        output_dir = Path(self.output_var.get()).expanduser().resolve()
+        output_dir.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "document_type": "2",
+            "source_type": "report_project_folders",
+            "source_root": str(
+                self._document_input_dir("2")
+            ),
+            "generated_at": datetime.now().isoformat(timespec="seconds"),
+            "reports": self.batch_reports,
+            "warnings": self.batch_warnings,
+            "errors": self.batch_errors,
+        }
+        (output_dir / "generation_manifest.json").write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+    def _finish_type2_batch_success(self) -> None:
+        self._write_type2_batch_manifest()
+        self.processing = False
+        self.current_type2_project_folder = None
+        self.status_var.set("类型 2 全部生成完成")
+        self._refresh_state()
+        document_count = len(self.batch_reports)
+        self._append_log(
+            f"类型 2 全部完成，共处理 "
+            f"{self.completed_type2_project_count} 个项目，"
+            f"生成 {document_count} 份 Word。"
+        )
+        messagebox.showinfo(
+            "生成完成",
+            f"已按顺序处理 {self.completed_type2_project_count} 个项目，"
+            f"生成 {document_count} 份文档。\n"
+            f"输出目录：\n{self.output_var.get()}",
+        )
 
     def _start_next_person(self) -> None:
         if not self.person_folders:
@@ -1303,7 +1759,7 @@ class ReportGeneratorApp:
     ) -> list[str]:
         arguments = [
             "--input-dir",
-            str(Path(self.input_dir_var.get()).expanduser().resolve()),
+            str(self._document_input_dir("1")),
             "--output-file",
             str(CURRENT_RECORDS_FILE),
             "--individual-dir",
@@ -1602,17 +2058,20 @@ class ReportGeneratorApp:
         self._write_batch_manifest()
 
     def _write_batch_records(self) -> None:
+        excel_files = sorted(
+            {
+                str((record.get("excel") or {}).get("file") or "")
+                for record in self.batch_records
+                if str((record.get("excel") or {}).get("file") or "")
+            }
+        )
         payload = {
             "schema_version": "2.0",
-            "source_type": "image_folders_with_excel",
+            "source_type": "report_folders_with_images_and_excel",
             "source_root": str(
-                Path(self.input_dir_var.get()).expanduser().resolve()
+                self._document_input_dir("1")
             ),
-            "excel_file": (
-                str(self.input_workbook)
-                if self.input_workbook is not None
-                else ""
-            ),
+            "excel_files": excel_files,
             "generated_at": datetime.now().isoformat(timespec="seconds"),
             "model": self.model_var.get(),
             "records": self.batch_records,
@@ -1654,7 +2113,9 @@ class ReportGeneratorApp:
     def _stop_batch(self) -> None:
         self.processing = False
         self.person_folders.clear()
+        self.type2_project_folders.clear()
         self.current_person_folder = None
+        self.current_type2_project_folder = None
         self.pending_guarantors.clear()
         self._refresh_state()
 

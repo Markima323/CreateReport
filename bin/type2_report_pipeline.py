@@ -8,7 +8,7 @@ import re
 import sys
 from collections import Counter
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
 
@@ -172,6 +172,50 @@ def format_rate(value: Any) -> str:
     return f"{number * 100:.2f}%"
 
 
+def format_excel_date_serial(value: Any) -> str:
+    number = numeric_value(value)
+    if number is None or not (20000 <= number <= 60000):
+        return ""
+    date_value = datetime(1899, 12, 30) + timedelta(days=int(number))
+    return f"{date_value.year}年{date_value.month}月{date_value.day}日"
+
+
+def format_table_cell(value: Any, header: str = "") -> str:
+    if value in (None, ""):
+        return ""
+    header_name = clean_text(header)
+    number = numeric_value(value)
+    if number is None:
+        return clean_text(value)
+    if any(marker in header_name for marker in ("日期", "年月", "启用", "到期")):
+        date_text = format_excel_date_serial(number)
+        if date_text:
+            return date_text
+    if "率" in header_name and "利率" not in header_name:
+        return format_rate(number)
+    if any(marker in header_name for marker in ("账号", "号码", "编号", "证号")):
+        return str(int(number)) if number.is_integer() else clean_text(value)
+    if any(
+        marker in header_name
+        for marker in (
+            "金额",
+            "价值",
+            "原值",
+            "净值",
+            "单价",
+            "注册资本",
+            "实收资本",
+            "出资额",
+            "面积",
+            "数量",
+        )
+    ):
+        return format_number(number)
+    if number.is_integer():
+        return str(int(number))
+    return clean_text(value)
+
+
 def sanitize_filename_part(value: str) -> str:
     cleaned = re.sub(r'[\\/:*?"<>|]', "_", clean_text(value))
     return cleaned.rstrip(". ") or "未命名"
@@ -190,6 +234,41 @@ def discover_excel_files(input_dir: Path) -> List[Path]:
     if not files:
         raise FileNotFoundError(f"项目目录中未找到 Excel 文件: {input_dir}")
     return files
+
+
+def discover_project_folders(input_root: Path) -> List[Path]:
+    if not input_root.is_dir():
+        raise FileNotFoundError(f"输入根目录不存在: {input_root}")
+    projects = []
+    for folder in sorted(
+        (path for path in input_root.iterdir() if path.is_dir()),
+        key=lambda path: path.name,
+    ):
+        has_detail_workbook = any(
+            path.is_file()
+            and not path.name.startswith("~$")
+            and path.suffix.lower() in SUPPORTED_EXCEL_SUFFIXES
+            and "评估明细表" in path.name
+            for path in folder.rglob("*")
+        )
+        if has_detail_workbook:
+            projects.append(folder)
+    if projects:
+        return projects
+
+    root_is_project = any(
+        path.is_file()
+        and not path.name.startswith("~$")
+        and path.suffix.lower() in SUPPORTED_EXCEL_SUFFIXES
+        and "评估明细表" in path.name
+        for path in input_root.rglob("*")
+    )
+    if root_is_project:
+        return [input_root]
+    raise ValueError(
+        "输入根目录中没有类型 2 项目子文件夹；"
+        "每个项目文件夹至少应包含一份名称带“评估明细表”的 Excel"
+    )
 
 
 @contextmanager
@@ -533,6 +612,154 @@ def matching_column(headers: Sequence[str], candidates: Sequence[str]) -> int:
     return -1
 
 
+def is_detail_data_marker(value: Any) -> bool:
+    text = clean_text(value)
+    return bool(re.fullmatch(r"\d+(?:\.0+)?", text)) or text in {
+        "合计",
+        "小计",
+        "总计",
+    }
+
+
+def first_detail_data_row(
+    matrix: Sequence[Sequence[Any]],
+    header_index: int,
+    sequence_col: int,
+) -> int:
+    for index in range(header_index + 1, min(len(matrix), header_index + 8)):
+        if is_detail_data_marker(row_value(matrix[index], sequence_col)):
+            return index
+    return min(header_index + 1, len(matrix))
+
+
+def detail_table_headers(
+    matrix: Sequence[Sequence[Any]],
+    header_index: int,
+    data_index: int,
+) -> List[str]:
+    width = max((len(row) for row in matrix[: max(data_index, header_index + 1)]), default=0)
+    headers = []
+    for column in range(width):
+        parts = []
+        for row_index in range(header_index, data_index):
+            text = clean_text(row_value(matrix[row_index], column))
+            if text and text not in parts:
+                parts.append(text)
+        headers.append("/".join(parts))
+    return headers
+
+
+def trim_table_columns(
+    headers: Sequence[str],
+    rows: Sequence[Sequence[Any]],
+) -> Tuple[List[str], List[List[Any]], List[int]]:
+    width = max([len(headers), *(len(row) for row in rows)], default=0)
+    used_columns = []
+    for column in range(width):
+        header = clean_text(row_value(headers, column))
+        has_data = any(clean_text(row_value(row, column)) for row in rows)
+        if header or has_data:
+            used_columns.append(column)
+    if not used_columns:
+        return [], [], []
+    trimmed_headers = [
+        clean_text(row_value(headers, column)) or f"列{index + 1}"
+        for index, column in enumerate(used_columns)
+    ]
+    trimmed_rows = [
+        [row_value(row, column) for column in used_columns]
+        for row in rows
+    ]
+    return trimmed_headers, trimmed_rows, used_columns
+
+
+def needs_display_text(header: str) -> bool:
+    return any(
+        marker in clean_text(header)
+        for marker in (
+            "账号",
+            "号码",
+            "编号",
+            "证号",
+            "权证",
+        )
+    )
+
+
+def cell_display_text(
+    sheet: Any,
+    row_index: int,
+    column_index: int,
+) -> str:
+    try:
+        used = sheet.UsedRange
+        first_row = int(used.Row)
+        first_column = int(used.Column)
+        return clean_text(
+            sheet.Cells(
+                first_row + row_index,
+                first_column + column_index,
+            ).Text
+        )
+    except Exception:
+        return ""
+
+
+def extract_detail_table(
+    sheet: Any,
+    matrix: Sequence[Sequence[Any]],
+    header_index: int,
+    subject: str,
+    sheet_name: str,
+) -> Dict[str, Any]:
+    base_headers = combined_headers(matrix, header_index)
+    sequence_col = matching_column(base_headers, ("序号",))
+    if sequence_col < 0:
+        return {
+            "subject": subject,
+            "sheet": sheet_name,
+            "headers": [],
+            "rows": [],
+            "row_count": 0,
+            "warnings": ["未找到序号列，未生成完整明细表"],
+        }
+    data_index = first_detail_data_row(matrix, header_index, sequence_col)
+    headers = detail_table_headers(matrix, header_index, data_index)
+    indexed_rows = [
+        (source_index, row)
+        for source_index, row in enumerate(matrix[data_index:], start=data_index)
+        if any(clean_text(cell) for cell in row)
+    ]
+    headers, raw_rows, used_columns = trim_table_columns(
+        headers,
+        [row for _source_index, row in indexed_rows],
+    )
+    formatted_rows = []
+    for (source_index, _source_row), row in zip(indexed_rows, raw_rows):
+        formatted_row = []
+        for index, value in enumerate(row):
+            header = row_value(headers, index)
+            if needs_display_text(header) and isinstance(value, (int, float)):
+                display = cell_display_text(
+                    sheet,
+                    source_index,
+                    row_value(used_columns, index) or 0,
+                )
+                if display and display != "###":
+                    formatted_row.append(display)
+                    continue
+            formatted_row.append(format_table_cell(value, header))
+        formatted_rows.append(formatted_row)
+    return {
+        "subject": subject,
+        "sheet": sheet_name,
+        "headers": headers,
+        "rows": formatted_rows,
+        "row_count": len(formatted_rows),
+        "warnings": [],
+    }
+
+
 def summarize_subject_sheet(
     sheet: Any,
     aliases: Dict[str, str],
@@ -546,12 +773,27 @@ def summarize_subject_sheet(
             "sheet": clean_text(sheet.Name),
             "item_count": None,
             "detail_headers": [],
+            "detail_table": {
+                "subject": subject,
+                "sheet": clean_text(sheet.Name),
+                "headers": [],
+                "rows": [],
+                "row_count": 0,
+                "warnings": ["未找到序号表头"],
+            },
             "content_summary": [],
             "location_summary": [],
             "representative_rows": [],
             "warnings": ["未找到序号表头"],
         }
     headers = combined_headers(matrix, header_index)
+    detail_table = extract_detail_table(
+        sheet,
+        matrix,
+        header_index,
+        subject,
+        clean_text(sheet.Name),
+    )
     sequence_col = matching_column(headers, ("序号",))
     content_col = matching_column(
         headers,
@@ -603,6 +845,7 @@ def summarize_subject_sheet(
         "sheet": clean_text(sheet.Name),
         "item_count": max_sequence or None,
         "detail_headers": [header for header in headers if header],
+        "detail_table": detail_table,
         "content_summary": [
             {"value": value, "count": count}
             for value, count in content_counts.most_common(8)
@@ -898,7 +1141,7 @@ def select_method_library(
             selected.append(
                 {
                     "subject": key,
-                    "plain_text": clean_text(entry.get("plain_text"))[:16000],
+                    "plain_text": str(entry.get("plain_text") or "").strip()[:16000],
                 }
             )
     return selected
@@ -955,7 +1198,7 @@ def call_gemini(
         "asset_descriptions 写范围表之后的委估资产负债、表外资产及引用报告段落；"
         "method_sections 和 technical_sections 按 subject_order 顺序输出。"
         "不要在段落中重复生成表格，汇总表由程序根据源 Excel 写入。"
-        "final_conclusion.method 为空时不得选择最终评估方法。\n\n"
+        "最终评估方法不明确时，不得擅自选择收益法、市场法或资产基础法作为最终结论。\n\n"
         "## 本次结构化数据\n"
         + json.dumps(compact_ai_input(data), ensure_ascii=False, indent=2)
     )
@@ -1021,6 +1264,9 @@ def table_before(
     anchor: Paragraph,
     headers: Sequence[str],
     rows: Sequence[Sequence[str]],
+    *,
+    font_size: int = 9,
+    format_cells: bool = True,
 ) -> Table:
     table = document.add_table(rows=1, cols=len(headers))
     table.style = "Table Grid"
@@ -1031,16 +1277,36 @@ def table_before(
         cells = table.add_row().cells
         for index, value in enumerate(row):
             cells[index].text = clean_text(value)
-    for row in table.rows:
-        for cell in row.cells:
-            for paragraph in cell.paragraphs:
-                paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                for run in paragraph.runs:
-                    run.font.name = "宋体"
-                    run._element.rPr.rFonts.set(qn("w:eastAsia"), "宋体")
-                    run.font.size = Pt(9)
+    if format_cells:
+        for row in table.rows:
+            for cell in row.cells:
+                for paragraph in cell.paragraphs:
+                    paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                    for run in paragraph.runs:
+                        run.font.name = "宋体"
+                        run._element.rPr.rFonts.set(qn("w:eastAsia"), "宋体")
+                        run.font.size = Pt(font_size)
     anchor._p.addprevious(table._tbl)
     return table
+
+
+def detail_table_before(
+    document: Document,
+    anchor: Paragraph,
+    detail_table: Dict[str, Any],
+) -> Optional[Table]:
+    headers = detail_table.get("headers") or []
+    rows = detail_table.get("rows") or []
+    if not headers or not rows:
+        return None
+    return table_before(
+        document,
+        anchor,
+        headers,
+        rows,
+        font_size=7,
+        format_cells=False,
+    )
 
 
 def find_placeholder(document: Document, placeholder: str) -> Paragraph:
@@ -1084,7 +1350,13 @@ def scope_table_rows(summary_rows: Sequence[Dict[str, Any]]) -> List[List[str]]:
         book = numeric_value(row.get("账面价值"))
         if project not in fixed and book in (None, 0):
             continue
-        rows.append([project, format_number(book)])
+        rows.append(
+            [
+                clean_text(row.get("序号")),
+                project,
+                format_number(book),
+            ]
+        )
     return rows
 
 
@@ -1100,6 +1372,7 @@ def conclusion_table_rows(
         rows.append(
             [
                 clean_text(row.get("项目")),
+                clean_text(row.get("序号")),
                 format_number(book),
                 format_number(assessed),
                 format_number(row.get("增减值")),
@@ -1129,6 +1402,614 @@ def add_section_objects(anchor: Paragraph, sections: Any) -> None:
         add_paragraphs(anchor, section.get("paragraphs"))
 
 
+def detail_table_for_subject(
+    data: Dict[str, Any],
+    subject: str,
+) -> Dict[str, Any]:
+    subject_key = normalize_name(subject)
+    for item in data.get("subjects", []):
+        if normalize_name(item.get("subject")) == subject_key:
+            table = item.get("detail_table")
+            return table if isinstance(table, dict) else {}
+    return {}
+
+
+def add_detail_table_for_subject(
+    document: Document,
+    anchor: Paragraph,
+    data: Dict[str, Any],
+    subject: str,
+    *,
+    placement: str,
+) -> None:
+    options = data.get("_detail_table_options")
+    if not isinstance(options, dict):
+        options = {}
+    if not bool(options.get("enabled", True)):
+        return
+    if placement == "report_scope" and not bool(
+        options.get("insert_in_report_scope", True)
+    ):
+        return
+    if placement == "explanation_technical" and not bool(
+        options.get("insert_in_explanation_technical", True)
+    ):
+        return
+    subject_key = normalize_name(subject)
+    allowed_key = (
+        "report_scope_subjects"
+        if placement == "report_scope"
+        else "explanation_technical_subjects"
+    )
+    allowed_subjects = options.get(allowed_key)
+    if isinstance(allowed_subjects, list) and allowed_subjects:
+        allowed = {normalize_name(item) for item in allowed_subjects}
+        if subject_key not in allowed:
+            return
+    table = detail_table_for_subject(data, subject)
+    if not table.get("rows"):
+        return
+    max_rows = int(options.get("max_rows_per_detail_table") or 0)
+    if max_rows > 0 and len(table.get("rows") or []) > max_rows:
+        return
+    row_count = len(table.get("rows") or [])
+    sheet_name = clean_text(table.get("sheet"))
+    paragraph_before(
+        anchor,
+        f"{subject}明细表如下（来源：{sheet_name}，共{row_count}行）：",
+    )
+    detail_table_before(document, anchor, table)
+
+
+def add_asset_descriptions(
+    document: Document,
+    anchor: Paragraph,
+    data: Dict[str, Any],
+    paragraphs: Any,
+) -> None:
+    if not isinstance(paragraphs, list):
+        return
+    subject_names = {
+        normalize_name(item.get("subject")): clean_text(item.get("subject"))
+        for item in data.get("subjects", [])
+        if isinstance(item.get("detail_table"), dict)
+        and item.get("detail_table", {}).get("rows")
+    }
+    pending_subject = ""
+    for text in paragraphs:
+        text = clean_text(text)
+        if not text:
+            continue
+        paragraph_before(anchor, text)
+        normalized = normalize_name(text)
+        if normalized in subject_names:
+            pending_subject = subject_names[normalized]
+            continue
+        if pending_subject:
+            add_detail_table_for_subject(
+                document,
+                anchor,
+                data,
+                pending_subject,
+                placement="report_scope",
+            )
+            pending_subject = ""
+    if pending_subject:
+        add_detail_table_for_subject(
+            document,
+            anchor,
+            data,
+            pending_subject,
+            placement="report_scope",
+        )
+
+
+def add_section_objects_with_detail_tables(
+    document: Document,
+    anchor: Paragraph,
+    data: Dict[str, Any],
+    sections: Any,
+) -> None:
+    if not isinstance(sections, list):
+        return
+    for section in sections:
+        if not isinstance(section, dict):
+            continue
+        subject = clean_text(section.get("subject"))
+        if subject:
+            paragraph_before(anchor, subject, "报告节标题")
+        add_paragraphs(anchor, section.get("paragraphs"))
+        if subject:
+            add_detail_table_for_subject(
+                document,
+                anchor,
+                data,
+                subject,
+                placement="explanation_technical",
+            )
+
+
+def format_wanyuan_from_yuan(value: Any) -> str:
+    number = numeric_value(value)
+    if number is None:
+        return "-"
+    return format_number(number / 10000)
+
+
+def find_summary_row(
+    rows: Sequence[Dict[str, Any]],
+    name: str,
+) -> Dict[str, Any]:
+    target = normalize_name(name)
+    for row in rows:
+        if normalize_name(row.get("项目")) == target:
+            return row
+    return {}
+
+
+def subject_lookup(data: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    return {
+        normalize_name(item.get("subject")): item
+        for item in data.get("subjects", [])
+        if clean_text(item.get("subject"))
+    }
+
+
+def classification_lookup(data: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    return {
+        normalize_name(item.get("科目名称")): item
+        for item in data.get("classification_summary", {}).get("rows", [])
+        if clean_text(item.get("科目名称"))
+    }
+
+
+def clean_subject_name(subject: str) -> str:
+    return clean_text(subject).replace("固定资产-", "").replace("无形资产-", "")
+
+
+def nonzero_subject_order(data: Dict[str, Any]) -> List[str]:
+    classes = classification_lookup(data)
+    result = []
+    for subject in data.get("subject_order", []):
+        row = classes.get(normalize_name(subject), {})
+        book = numeric_value(row.get("账面价值"))
+        assessed = numeric_value(row.get("评估价值"))
+        if book not in (None, 0) or assessed not in (None, 0):
+            result.append(clean_subject_name(subject))
+    return result
+
+
+def valuation_subject_order(data: Dict[str, Any]) -> List[str]:
+    ordered = []
+    for subject in nonzero_subject_order(data):
+        if subject not in ordered:
+            ordered.append(subject)
+    for item in data.get("subjects", []):
+        subject = clean_subject_name(clean_text(item.get("subject")))
+        if not subject:
+            continue
+        book = numeric_value(item.get("book_value"))
+        assessed = numeric_value(item.get("assessed_value"))
+        has_details = bool(item.get("item_count")) or bool(item.get("representative_rows"))
+        if book in (None, 0) and assessed in (None, 0) and not has_details:
+            continue
+        if subject not in ordered:
+            ordered.append(subject)
+    return ordered
+
+
+def subjects_in_category(
+    data: Dict[str, Any],
+    category: str,
+) -> List[str]:
+    classes = [
+        row
+        for row in data.get("classification_summary", {}).get("rows", [])
+        if clean_text(row.get("类别")) == category
+        and clean_text(row.get("科目名称"))
+    ]
+    ordered = []
+    for row in classes:
+        book = numeric_value(row.get("账面价值"))
+        assessed = numeric_value(row.get("评估价值"))
+        if book in (None, 0) and assessed in (None, 0):
+            continue
+        name = clean_subject_name(clean_text(row.get("科目名称")))
+        if name not in ordered:
+            ordered.append(name)
+    return ordered
+
+
+def join_cn(items: Sequence[str]) -> str:
+    cleaned = [clean_text(item) for item in items if clean_text(item)]
+    if not cleaned:
+        return ""
+    if len(cleaned) == 1:
+        return cleaned[0]
+    return "、".join(cleaned)
+
+
+def top_values(
+    values: Any,
+    *,
+    limit: int = 5,
+) -> List[str]:
+    if not isinstance(values, list):
+        return []
+    result = []
+    for item in values:
+        if isinstance(item, dict):
+            value = clean_text(item.get("value"))
+        else:
+            value = clean_text(item)
+        if value and value not in result:
+            result.append(value)
+        if len(result) >= limit:
+            break
+    return result
+
+
+def describe_subject(
+    subject: str,
+    item: Dict[str, Any],
+    class_row: Dict[str, Any],
+) -> str:
+    subject = clean_subject_name(subject)
+    book = numeric_value(item.get("book_value"))
+    if book is None:
+        book = numeric_value(class_row.get("账面价值"))
+    assessed = numeric_value(item.get("assessed_value"))
+    if assessed is None:
+        assessed = numeric_value(class_row.get("评估价值"))
+    book_text = format_wanyuan_from_yuan(book)
+    value_phrase = (
+        f"账面价值{book_text}万元"
+        if book is not None
+        else "账面价值按评估明细表汇总列示"
+    )
+    item_count = item.get("item_count")
+    count_text = f"，共{int(item_count)}项" if isinstance(item_count, int) else ""
+    content = join_cn(top_values(item.get("content_summary"), limit=4))
+    location = join_cn(top_values(item.get("location_summary"), limit=3))
+    age = clean_text(item.get("main_age_bucket"))
+
+    tail_parts = []
+    if content:
+        tail_parts.append(f"主要为{content}")
+    if location:
+        tail_parts.append(f"存放或坐落于{location}")
+    if age:
+        tail_parts.append(f"账龄以{age}为主")
+    tail = "，" + "，".join(tail_parts) if tail_parts else ""
+
+    if subject in {"应收账款", "其他应收款"}:
+        return (
+            f"{subject}{value_phrase}{count_text}{tail}。"
+            "坏账准备按评估明细表列示口径处理。"
+        )
+    if subject in {"应付账款", "预收款项", "其他应付款"}:
+        return f"{subject}{value_phrase}{count_text}{tail}。"
+    if subject == "货币资金":
+        return f"{subject}{value_phrase}{count_text}，包括现金、银行存款或其他货币资金等。"
+    if assessed not in (None, 0) and book in (None, 0):
+        return f"{subject}账面价值为零，评估价值{format_wanyuan_from_yuan(assessed)}万元。"
+    return f"{subject}{value_phrase}{count_text}{tail}。"
+
+
+def child_subject_names(parent: str) -> List[str]:
+    mapping = {
+        "存货": ["原材料", "产成品", "在产品", "库存商品", "周转材料", "发出商品"],
+        "固定资产": [
+            "房屋建筑物",
+            "构筑物及其他辅助设施",
+            "机器设备",
+            "车辆",
+            "电子设备",
+        ],
+        "无形资产": ["土地使用权", "其他无形资产", "技术类无形资产"],
+    }
+    return mapping.get(clean_subject_name(parent), [])
+
+
+def build_programmatic_scope_sections(
+    data: Dict[str, Any],
+) -> Tuple[List[str], List[str]]:
+    entity = clean_text(data["project"].get("被评估单位"))
+    scope_intro = [
+        "（一）评估对象",
+        f"本次评估对象为{entity}于评估基准日的股东全部权益价值。",
+        "（二）评估范围",
+        (
+            f"包括{entity}评估基准日未审资产负债表列示的全部资产和负债，"
+            f"以及{entity}申报的表外资产，并且由{entity}提供的清单载明，"
+            "具体评估范围请见本报告所附的“评估明细表”。"
+        ),
+        "企业申报的评估基准日表内资产及负债对应的会计报表未经审计，具体情况见下表：",
+    ]
+
+    summary_rows = data.get("asset_basis_summary", {}).get("rows", [])
+    classes = classification_lookup(data)
+    subjects = subject_lookup(data)
+    category_names = []
+    for name in ("流动资产", "非流动资产", "流动负债", "非流动负债"):
+        row = find_summary_row(summary_rows, name)
+        book = numeric_value(row.get("账面价值"))
+        if book not in (None, 0):
+            category_names.append(name)
+
+    asset_descriptions = [
+        "被评估单位填写的评估明细表内容除申报的表外资产外与未审资产负债表内容相一致。被评估单位已承诺无应纳入而未纳入本次评估范围的资产和负债。纳入评估范围的资产和负债与委托评估时确定的范围是一致的。",
+        "委估主要资产及负债情况",
+        (
+            "纳入本次评估范围中的资产及负债包括"
+            f"{join_cn(category_names)}，其中："
+        ),
+    ]
+    for category in category_names:
+        names = subjects_in_category(data, category)
+        if not names:
+            continue
+        asset_descriptions.extend(
+            [
+                category,
+                f"{category}包括{join_cn(names)}。",
+            ]
+        )
+        for name in names:
+            item = subjects.get(normalize_name(name), {})
+            class_row = classes.get(normalize_name(name), {})
+            if not item and not class_row:
+                continue
+            asset_descriptions.extend(
+                [
+                    name,
+                    describe_subject(name, item, class_row),
+                ]
+            )
+            for child_name in child_subject_names(name):
+                child_item = subjects.get(normalize_name(child_name), {})
+                if not child_item:
+                    continue
+                if not child_item.get("item_count") and not child_item.get(
+                    "representative_rows"
+                ):
+                    continue
+                asset_descriptions.extend(
+                    [
+                        child_name,
+                        describe_subject(child_name, child_item, {}),
+                    ]
+                )
+    off_balance = data.get("off_balance_assets") or []
+    asset_descriptions.append("企业申报的表外资产情况")
+    if off_balance:
+        asset_descriptions.append(
+            "企业申报的表外资产包括"
+            + join_cn(clean_text(item.get("asset_type")) for item in off_balance)
+            + "。"
+        )
+    else:
+        asset_descriptions.append("本次评估企业无申报的表外资产。")
+    asset_descriptions.extend(
+        [
+            "引用其他机构报告结论的情况",
+            "本资产评估报告的评估结论无引用其他机构出具的报告的结论。",
+        ]
+    )
+    return scope_intro, asset_descriptions
+
+
+def build_programmatic_method_sections(data: Dict[str, Any]) -> List[Dict[str, Any]]:
+    library = {
+        normalize_name(item.get("subject")): str(item.get("plain_text") or "").strip()
+        for item in data.get("method_library", [])
+        if clean_text(item.get("subject"))
+    }
+    sections = []
+    used = set()
+    for subject in valuation_subject_order(data):
+        candidates = [
+            normalize_name(subject),
+            normalize_name(subject.replace("固定资产", "")),
+            normalize_name(subject.replace("无形资产", "")),
+        ]
+        text = ""
+        for candidate in candidates:
+            text = library.get(candidate, "")
+            if text:
+                break
+        if not text:
+            for key, value in library.items():
+                if key and (key in normalize_name(subject) or normalize_name(subject) in key):
+                    text = value
+                    break
+        if not text:
+            continue
+        paragraphs = [
+            line.strip()
+            for line in text.splitlines()
+            if line.strip() and line.strip() != "参考模板："
+        ]
+        if paragraphs and normalize_name(paragraphs[0]).endswith(normalize_name(subject)):
+            paragraphs = paragraphs[1:]
+        if not paragraphs:
+            continue
+        key = normalize_name(subject)
+        if key in used:
+            continue
+        used.add(key)
+        sections.append({"subject": subject, "paragraphs": paragraphs})
+    return sections
+
+
+def format_cn_date(date_text: str) -> str:
+    value = clean_text(date_text)
+    match = re.fullmatch(r"(\d{4})[-/.年](\d{1,2})[-/.月](\d{1,2})日?", value)
+    if not match:
+        return value
+    year, month, day = match.groups()
+    return f"{year}年{int(month)}月{int(day)}日"
+
+
+def next_year_minus_one_day(date_text: str) -> str:
+    value = clean_text(date_text)
+    for pattern in ("%Y-%m-%d", "%Y.%m.%d", "%Y/%m/%d"):
+        try:
+            start = datetime.strptime(value, pattern).date()
+            break
+        except ValueError:
+            start = None
+    if start is None:
+        return ""
+    try:
+        end = start.replace(year=start.year + 1) - timedelta(days=1)
+    except ValueError:
+        end = start.replace(year=start.year + 1, day=28) - timedelta(days=1)
+    return f"{end.year}年{end.month}月{end.day}日"
+
+
+def build_programmatic_conclusion_sections(
+    data: Dict[str, Any],
+) -> Tuple[List[str], List[str]]:
+    entity = clean_text(data["project"].get("被评估单位"))
+    benchmark = clean_text(data["project"].get("评估基准日"))
+    rows = data.get("asset_basis_summary", {}).get("rows", [])
+    assets = find_summary_row(rows, "资产总计")
+    liabilities = find_summary_row(rows, "负债总计")
+    equity = find_summary_row(rows, "股东全部权益价值") or find_summary_row(
+        rows,
+        "净资产",
+    )
+
+    conclusion_intro = [
+        (
+            "根据国家有关资产评估的法律、行政法规及资产评估准则的规定，"
+            f"本着独立、客观、公正的原则及必要的评估程序，对{entity}"
+            "的股东全部权益价值进行了评估。根据以上评估工作，得出如下评估结论："
+        ),
+        "资产基础法评估结果",
+    ]
+    if assets and liabilities and equity:
+        conclusion_intro.append(
+            (
+                f"经资产基础法评估，{entity}总资产账面值"
+                f"{format_number(assets.get('账面价值'))}万元，评估值"
+                f"{format_number(assets.get('评估价值'))}万元，增值额"
+                f"{format_number(assets.get('增减值'))}万元，增值率"
+                f"{format_rate(assets.get('增值率'))}；负债账面值"
+                f"{format_number(liabilities.get('账面价值'))}万元，评估值"
+                f"{format_number(liabilities.get('评估价值'))}万元，增值额"
+                f"{format_number(liabilities.get('增减值'))}万元，增值率"
+                f"{format_rate(liabilities.get('增值率'))}；股东全部权益账面值"
+                f"{format_number(equity.get('账面价值'))}万元，评估值"
+                f"{format_number(equity.get('评估价值'))}万元，增值额"
+                f"{format_number(equity.get('增减值'))}万元，增值率"
+                f"{format_rate(equity.get('增值率'))}。资产基础法评估结果详见下表："
+            )
+        )
+    conclusion_intro.append("资产评估结果汇总表（资产基础法）")
+
+    final_conclusion = ["最终评估结论"]
+    if equity:
+        final_conclusion.append(
+            (
+                f"经评估，{entity}股东全部权益评估价值为"
+                f"{format_number(equity.get('评估价值'))}万元，比账面价值"
+                f"{format_number(equity.get('账面价值'))}万元增值"
+                f"{format_number(equity.get('增减值'))}万元，增值率"
+                f"{format_rate(equity.get('增值率'))}。"
+            )
+        )
+    valid_to = next_year_minus_one_day(benchmark)
+    final_conclusion.append("评估结论的使用有效期")
+    if valid_to:
+        final_conclusion.append(
+            (
+                "本评估报告所揭示的评估结论仅对评估报告中描述的经济行为有效，"
+                "评估结论使用有效期为自评估基准日起一年，即自评估基准日"
+                f"{format_cn_date(benchmark)}起至{valid_to}止。超过一年使用本资产评估报告所列示的评估结论无效。"
+                "国家法律、行政法规另有规定的除外。"
+            )
+        )
+    return conclusion_intro, final_conclusion
+
+
+def build_programmatic_technical_sections(data: Dict[str, Any]) -> List[Dict[str, Any]]:
+    classes = classification_lookup(data)
+    subjects = subject_lookup(data)
+    method_sections = {
+        normalize_name(section.get("subject")): section.get("paragraphs", [])
+        for section in build_programmatic_method_sections(data)
+    }
+    sections = []
+    for subject in valuation_subject_order(data):
+        item = subjects.get(normalize_name(subject), {})
+        class_row = classes.get(normalize_name(subject), {})
+        book = numeric_value(item.get("book_value"))
+        if book is None:
+            book = numeric_value(class_row.get("账面价值"))
+        assessed = numeric_value(item.get("assessed_value"))
+        if assessed is None:
+            assessed = numeric_value(class_row.get("评估价值"))
+        paragraphs = [
+            "评估范围",
+            f"本次评估范围为{subject}，账面价值{format_wanyuan_from_yuan(book)}万元。",
+            "资产概况",
+            describe_subject(subject, item, class_row),
+            "评估过程",
+            "准备阶段",
+            "对确定的评估范围内的资产或负债的构成情况进行初步了解，提交评估准备资料清单和评估申报明细表标准格式，指导企业填写评估申报明细表。",
+            "现场调查阶段",
+            "根据企业提供的评估申报资料，进行总账、明细账、会计报表及评估明细表的核对，使之相符；对内容不符、重复申报、遗漏未报项目进行改正，由企业重新填报。",
+            "评定估算阶段",
+            "在账务核对清晰、情况了解清楚并已收集到评估所需资料的基础上进行评定估算，编制评估明细表和汇总表，撰写评估技术说明。",
+            "评估方法",
+        ]
+        paragraphs.extend(method_sections.get(normalize_name(subject), []))
+        paragraphs.extend(
+            [
+                "评估结果",
+                f"经评估，{subject}评估值为{format_wanyuan_from_yuan(assessed)}万元。",
+            ]
+        )
+        sections.append({"subject": subject, "paragraphs": paragraphs})
+    return sections
+
+
+def enrich_generated_sections(
+    data: Dict[str, Any],
+    generated: Dict[str, Any],
+    rules: Dict[str, Any],
+) -> Dict[str, Any]:
+    generated = json.loads(json.dumps(generated, ensure_ascii=False))
+    data["_detail_table_options"] = rules.get("detail_tables", {})
+    report = generated.setdefault("report", {})
+    explanation = generated.setdefault("explanation", {})
+    scope_intro, asset_descriptions = build_programmatic_scope_sections(data)
+    conclusion_intro, final_conclusion = build_programmatic_conclusion_sections(data)
+    method_sections = build_programmatic_method_sections(data)
+    technical_sections = build_programmatic_technical_sections(data)
+
+    fallbacks = rules.get("programmatic_section_fallbacks", {})
+    if fallbacks.get("scope", True):
+        report["scope_intro"] = scope_intro
+        report["asset_descriptions"] = asset_descriptions
+        explanation["scope_intro"] = scope_intro
+    if fallbacks.get("method_sections", True) and method_sections:
+        report["method_sections"] = method_sections
+    if fallbacks.get("conclusion", True):
+        report["conclusion_intro"] = conclusion_intro
+        report["final_conclusion"] = final_conclusion
+    if fallbacks.get("physical_assets", True):
+        explanation["physical_assets"] = [
+            "实物资产的分布情况及特点",
+            *asset_descriptions,
+        ]
+    if fallbacks.get("technical_sections", True) and technical_sections:
+        explanation["technical_sections"] = technical_sections
+    return generated
+
+
 def render_report(
     template_file: Path,
     output_file: Path,
@@ -1145,10 +2026,15 @@ def render_report(
     table_before(
         document,
         scope_anchor,
-        ("项目", "账面价值"),
+        ("序号", "项目", "账面价值"),
         scope_table_rows(summary_rows),
     )
-    add_paragraphs(scope_anchor, report.get("asset_descriptions"))
+    add_asset_descriptions(
+        document,
+        scope_anchor,
+        data,
+        report.get("asset_descriptions"),
+    )
     remove_paragraph(scope_anchor)
 
     method_anchor = find_placeholder(
@@ -1164,7 +2050,7 @@ def render_report(
     table_before(
         document,
         conclusion_anchor,
-        ("项目", "账面价值", "评估价值", "增减值", "增值率"),
+        ("项目", "序号", "账面价值", "评估价值", "增减值", "增值率"),
         conclusion_table_rows(summary_rows),
     )
     add_paragraphs(conclusion_anchor, report.get("final_conclusion"))
@@ -1192,7 +2078,7 @@ def render_explanation(
     table_before(
         document,
         scope_anchor,
-        ("项目", "账面价值"),
+        ("序号", "项目", "账面价值"),
         scope_table_rows(summary_rows),
     )
     remove_paragraph(scope_anchor)
@@ -1208,7 +2094,12 @@ def render_explanation(
         document,
         "说明_资产基础法评估技术说明",
     )
-    add_section_objects(technical_anchor, explanation.get("technical_sections"))
+    add_section_objects_with_detail_tables(
+        document,
+        technical_anchor,
+        data,
+        explanation.get("technical_sections"),
+    )
     remove_paragraph(technical_anchor)
 
     output_file.parent.mkdir(parents=True, exist_ok=True)
@@ -1337,6 +2228,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         data=data,
         store=store,
     )
+    data["gemini_generated_sections"] = generated
+    generated = enrich_generated_sections(data, generated, rules)
     data["generated_sections"] = generated
     data["gemini"] = interaction
     records_file.write_text(
