@@ -38,6 +38,110 @@ SUMMARY_SHEET = "汇总-资产基础法"
 CLASSIFICATION_SHEET = "2分类汇总"
 DEFAULT_MODEL = "gemini-3.5-flash"
 
+DEFAULT_WORKPAPER_TABLE_OPTIONS: Dict[str, Any] = {
+    "enabled": True,
+    "insert_in_explanation_technical": True,
+    "send_to_ai": False,
+    "max_scan_rows": 500,
+    "max_scan_columns": 40,
+    "max_rows_per_table": 80,
+    "max_columns_per_table": 40,
+    "max_tables_per_workpaper": 12,
+    "max_tables_per_subject": 10,
+}
+
+WORKPAPER_TABLE_KEYWORDS = (
+    "案例",
+    "实例",
+    "可比",
+    "比较因素",
+    "交易价格",
+    "交易情况",
+    "市场状况",
+    "修正",
+    "系数",
+    "参数",
+    "取费",
+    "指数",
+    "重置",
+    "成新",
+    "耐用年限",
+    "尚可使用年限",
+    "经济寿命",
+    "折旧",
+    "摊销",
+    "租金",
+    "收益",
+    "资本化率",
+    "折现率",
+    "净现金流",
+    "市盈率",
+    "市净率",
+    "P/B",
+    "P/E",
+    "比率",
+    "折扣率",
+    "溢价率",
+    "权重",
+    "财务指标",
+    "非流动性折扣",
+    "流动性折扣",
+    "控制权溢价",
+    "少数股权",
+    "基本重置价",
+    "层高调整",
+    "土地使用年期",
+)
+
+WORKPAPER_HEADER_KEYWORDS = (
+    "序号",
+    "项目",
+    "指标",
+    "因素",
+    "案例",
+    "实例",
+    "评估对象",
+    "公司名称",
+    "名称",
+    "交易价格",
+    "比 较 因 素",
+)
+
+WORKPAPER_EXCLUDE_TABLE_KEYWORDS = (
+    "资产负债表--资产",
+    "资产负债表--负债",
+)
+
+WORKPAPER_SUBJECT_HINTS: Sequence[Tuple[str, Sequence[str]]] = (
+    (
+        "长期股权投资",
+        (
+            "长期股权",
+            "股权",
+            "企业价值",
+            "交易案例",
+            "对比公司",
+            "上市公司",
+            "财务指标",
+            "中小企业发展指数",
+            "非流动性折扣",
+            "控制权溢价",
+            "少数股权",
+        ),
+    ),
+    ("房屋建筑物", ("房屋", "建筑物", "厂房", "办公楼", "不动产", "租金")),
+    ("构筑物及其他辅助设施", ("构筑物", "道路", "围墙", "冷却塔")),
+    ("土地使用权", ("土地", "地价", "宗地", "土地使用年期", "工业用地")),
+    ("机器设备", ("机器设备", "生产设备", "设备评估", "通用设备", "专用设备")),
+    ("车辆", ("车辆", "运输设备")),
+    ("电子设备", ("电子设备", "办公设备", "电脑")),
+    ("存货", ("存货", "原材料", "产成品", "库存商品", "发出商品")),
+    ("在建工程", ("在建工程",)),
+    ("技术类无形资产", ("专利", "专有技术", "软件著作权")),
+    ("其他无形资产", ("商标", "软件", "无形资产")),
+    ("投资性房地产", ("投资性房地产", "商铺", "租金")),
+)
+
 RESPONSE_SCHEMA: Dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -962,6 +1066,333 @@ def summarize_workpaper(excel: Any, path: Path) -> Dict[str, Any]:
         }
 
 
+def detect_method(texts: Iterable[str]) -> str:
+    joined = "\n".join(texts)
+    methods = []
+    for method in (
+        "假设开发法",
+        "上市公司比较法",
+        "交易案例比较法",
+        "市场法",
+        "收益法",
+        "重置成本法",
+        "成本法",
+        "资产基础法",
+    ):
+        if method in joined and method not in methods:
+            methods.append(method)
+    return "、".join(methods)
+
+
+def workpaper_table_options(rules: Dict[str, Any]) -> Dict[str, Any]:
+    options = dict(DEFAULT_WORKPAPER_TABLE_OPTIONS)
+    configured = rules.get("workpaper_tables")
+    if isinstance(configured, dict):
+        options.update(configured)
+    return options
+
+
+def option_int(options: Dict[str, Any], key: str, default: int) -> int:
+    try:
+        value = int(options.get(key, default))
+    except (TypeError, ValueError):
+        return default
+    return value if value > 0 else default
+
+
+def keyword_hits(text: str, keywords: Sequence[str]) -> List[str]:
+    source = text.upper()
+    hits = []
+    for keyword in keywords:
+        if keyword.upper() in source and keyword not in hits:
+            hits.append(keyword)
+    return hits
+
+
+def row_nonempty_texts(row: Sequence[Any]) -> List[str]:
+    return [clean_text(cell) for cell in row if clean_text(cell)]
+
+
+def split_nonempty_row_blocks(
+    matrix: Sequence[Sequence[Any]],
+) -> List[List[Tuple[int, Sequence[Any]]]]:
+    blocks: List[List[Tuple[int, Sequence[Any]]]] = []
+    current: List[Tuple[int, Sequence[Any]]] = []
+    for index, row in enumerate(matrix):
+        if row_nonempty_texts(row):
+            current.append((index, row))
+            continue
+        if current:
+            blocks.append(current)
+            current = []
+    if current:
+        blocks.append(current)
+    return blocks
+
+
+def choose_workpaper_header_index(
+    block: Sequence[Tuple[int, Sequence[Any]]],
+) -> int:
+    limit = min(len(block), 12)
+    for index, (_source_index, row) in enumerate(block[:limit]):
+        texts = row_nonempty_texts(row)
+        if len(texts) >= 2 and keyword_hits(" ".join(texts), WORKPAPER_HEADER_KEYWORDS):
+            return index
+    for index, (_source_index, row) in enumerate(block[:limit]):
+        if len(row_nonempty_texts(row)) >= 3:
+            return index
+    for index, (_source_index, row) in enumerate(block[:limit]):
+        if len(row_nonempty_texts(row)) >= 2:
+            return index
+    return -1
+
+
+def workpaper_table_title(
+    path: Path,
+    sheet_name: str,
+    block: Sequence[Tuple[int, Sequence[Any]]],
+    header_index: int,
+) -> str:
+    if header_index <= 0:
+        return clean_text(sheet_name) or path.stem
+    metadata_markers = ("评估基准日", "被评估单位", "金额单位", "单位：")
+    for _source_index, row in block[: max(header_index, 1)]:
+        texts = row_nonempty_texts(row)
+        if not texts:
+            continue
+        title = " ".join(texts)
+        if (
+            len(texts) <= 2
+            and len(title) <= 80
+            and not any(marker in title for marker in metadata_markers)
+        ):
+            return title
+    return clean_text(sheet_name) or path.stem
+
+
+def infer_workpaper_subject_hints(text: str) -> List[str]:
+    normalized = normalize_name(text)
+    matches = []
+    for subject, aliases in WORKPAPER_SUBJECT_HINTS:
+        candidates = (subject, *aliases)
+        if any(normalize_name(candidate) in normalized for candidate in candidates):
+            matches.append(subject)
+    return matches
+
+
+def workpaper_table_excluded(search_text: str) -> bool:
+    if any(keyword in search_text for keyword in WORKPAPER_EXCLUDE_TABLE_KEYWORDS):
+        return True
+    if "资产负债表" not in search_text:
+        is_asset_detail = "资产编号" in search_text and "账面价值" in search_text
+        keep_markers = (
+            "比较因素",
+            "案例",
+            "实例",
+            "参数",
+            "价格指数",
+            "调整系数表",
+            "成新率计算表",
+        )
+        return is_asset_detail and not any(marker in search_text for marker in keep_markers)
+    keep_markers = ("市场法评估明细表", "财务指标", "可比", "案例", "修正")
+    return not any(marker in search_text for marker in keep_markers)
+
+
+def build_workpaper_table(
+    sheet: Any,
+    path: Path,
+    sheet_name: str,
+    block: Sequence[Tuple[int, Sequence[Any]]],
+    options: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    header_index = choose_workpaper_header_index(block)
+    if header_index < 0 or header_index >= len(block) - 1:
+        return None
+    header_source_index, header_row = block[header_index]
+    data_rows = [
+        (source_index, row)
+        for source_index, row in block[header_index + 1 :]
+        if row_nonempty_texts(row)
+    ]
+    if not data_rows:
+        return None
+    raw_headers, raw_rows, used_columns = trim_table_columns(
+        header_row,
+        [row for _source_index, row in data_rows],
+    )
+    if len(raw_headers) < 2 or not raw_rows:
+        return None
+
+    max_rows = option_int(options, "max_rows_per_table", 80)
+    max_columns = option_int(options, "max_columns_per_table", 40)
+    if len(raw_rows) > max_rows or len(raw_headers) > max_columns:
+        return None
+
+    headers = []
+    for index, header in enumerate(raw_headers):
+        used_column = row_value(used_columns, index) or 0
+        display = cell_display_text(sheet, header_source_index, used_column)
+        headers.append(display or clean_text(header) or f"列{index + 1}")
+
+    rows = []
+    for source_index, row in data_rows:
+        formatted = []
+        for index, _header in enumerate(headers):
+            used_column = row_value(used_columns, index) or 0
+            display = cell_display_text(sheet, source_index, used_column)
+            value = row_value(row, used_column)
+            if display and display != "###":
+                formatted.append(display)
+            else:
+                formatted.append(format_table_cell(value, row_value(headers, index)))
+        if any(clean_text(cell) for cell in formatted):
+            rows.append(formatted)
+    if not rows:
+        return None
+
+    title = workpaper_table_title(path, sheet_name, block, header_index)
+    title_scope = f"{sheet_name} {title}"
+    if any(marker in title_scope for marker in ("资产表", "负债表", "资产负债表", "租赁合同台账")):
+        return None
+    if "评估底稿" in title_scope and not any(
+        marker in title_scope
+        for marker in ("案例", "实例", "参数", "指数", "修正系数", "调整系数", "成新率")
+    ):
+        return None
+    preview_values = [
+        path.name,
+        str(path.parent),
+        sheet_name,
+        title,
+        *headers,
+        *(cell for row in rows[:12] for cell in row),
+    ]
+    search_text = " ".join(clean_text(value) for value in preview_values)
+    hits = keyword_hits(
+        search_text,
+        tuple(options.get("keywords") or WORKPAPER_TABLE_KEYWORDS),
+    )
+    if not hits or workpaper_table_excluded(search_text):
+        return None
+
+    subject_text = " ".join(
+        clean_text(value)
+        for value in (
+            sheet_name,
+            title,
+            *headers,
+            *(cell for row in rows[:12] for cell in row),
+        )
+    )
+    subject_hints = infer_workpaper_subject_hints(subject_text)
+    if not subject_hints:
+        subject_hints = infer_workpaper_subject_hints(search_text)
+    title_scope_key = normalize_name(title_scope)
+    if "构筑物" in title_scope_key and "房屋建筑物" not in title_scope_key:
+        subject_hints = [
+            hint for hint in subject_hints if hint != "房屋建筑物"
+        ]
+    if "房屋建筑物" in title_scope_key and "构筑物" not in title_scope_key:
+        subject_hints = [
+            hint for hint in subject_hints if hint != "构筑物及其他辅助设施"
+        ]
+
+    return {
+        "title": title,
+        "source_file": str(path),
+        "file_name": path.name,
+        "sheet": sheet_name,
+        "headers": headers,
+        "rows": rows,
+        "row_count": len(rows),
+        "column_count": len(headers),
+        "keywords": hits,
+        "subject_hints": subject_hints,
+    }
+
+
+def extract_workpaper_tables(
+    sheets: Sequence[Any],
+    path: Path,
+    rules: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    options = workpaper_table_options(rules)
+    if not bool(options.get("enabled", True)):
+        return []
+    max_scan_rows = option_int(options, "max_scan_rows", 500)
+    max_scan_columns = option_int(options, "max_scan_columns", 40)
+    max_tables = option_int(options, "max_tables_per_workpaper", 12)
+    tables = []
+    seen = set()
+    for sheet in sheets:
+        sheet_name = clean_text(sheet.Name)
+        matrix = read_range(
+            sheet,
+            max_rows=max_scan_rows,
+            max_columns=max_scan_columns,
+        )
+        for block in split_nonempty_row_blocks(matrix):
+            table = build_workpaper_table(
+                sheet,
+                path,
+                sheet_name,
+                block,
+                options,
+            )
+            if not table:
+                continue
+            key = (
+                table["file_name"],
+                table["sheet"],
+                table["title"],
+                tuple(table["headers"]),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            tables.append(table)
+            if len(tables) >= max_tables:
+                return tables
+    return tables
+
+
+def summarize_workpaper(
+    excel: Any,
+    path: Path,
+    rules: Dict[str, Any],
+) -> Dict[str, Any]:
+    with open_workbook(excel, path) as workbook:
+        sheets = visible_worksheets(workbook)
+        key_text = []
+        sheet_names = []
+        for sheet in sheets:
+            sheet_names.append(clean_text(sheet.Name))
+            matrix = read_range(sheet, max_rows=15, max_columns=20)
+            for row in matrix:
+                for cell in row:
+                    text = clean_text(cell)
+                    if text and text not in key_text:
+                        key_text.append(text)
+                    if len(key_text) >= 80:
+                        break
+                if len(key_text) >= 80:
+                    break
+            if len(key_text) >= 80:
+                break
+        tables = extract_workpaper_tables(sheets, path, rules)
+        return {
+            "file": str(path),
+            "kind": detect_method([path.name, *sheet_names, *key_text]),
+            "visible_sheets": sheet_names,
+            "valuation_method": detect_method(key_text),
+            "key_text": key_text[:40],
+            "tables": tables,
+            "table_count": len(tables),
+            "warnings": [],
+        }
+
+
 def build_input_data(
     input_dir: Path,
     excel_files: Sequence[Path],
@@ -1021,7 +1452,7 @@ def build_input_data(
         for index, path in enumerate(workpaper_paths, start=1):
             print(f"[工作底稿 {index}/{len(workpaper_paths)}] {path.name}")
             try:
-                workpapers.append(summarize_workpaper(excel, path))
+                workpapers.append(summarize_workpaper(excel, path, rules))
             except Exception as exc:
                 workpapers.append(
                     {
@@ -1030,6 +1461,8 @@ def build_input_data(
                         "visible_sheets": [],
                         "valuation_method": "",
                         "key_text": [],
+                        "tables": [],
+                        "table_count": 0,
                         "warnings": [str(exc)],
                     }
                 )
@@ -1147,6 +1580,43 @@ def select_method_library(
     return selected
 
 
+def compact_workpapers_for_ai(workpapers: Any) -> List[Dict[str, Any]]:
+    if not isinstance(workpapers, list):
+        return []
+    compact = []
+    for item in workpapers:
+        if not isinstance(item, dict):
+            continue
+        tables = []
+        for table in item.get("tables") or []:
+            if not isinstance(table, dict):
+                continue
+            tables.append(
+                {
+                    "title": table.get("title"),
+                    "sheet": table.get("sheet"),
+                    "file_name": table.get("file_name"),
+                    "row_count": table.get("row_count"),
+                    "column_count": table.get("column_count"),
+                    "keywords": table.get("keywords"),
+                    "subject_hints": table.get("subject_hints"),
+                }
+            )
+        compact.append(
+            {
+                "file": item.get("file"),
+                "kind": item.get("kind"),
+                "visible_sheets": item.get("visible_sheets"),
+                "valuation_method": item.get("valuation_method"),
+                "key_text": item.get("key_text"),
+                "table_count": item.get("table_count"),
+                "tables": tables,
+                "warnings": item.get("warnings"),
+            }
+        )
+    return compact
+
+
 def compact_ai_input(data: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "project": data["project"],
@@ -1176,7 +1646,7 @@ def compact_ai_input(data: Dict[str, Any]) -> Dict[str, Any]:
             for item in data["subjects"]
         ],
         "physical_assets": data["physical_assets"],
-        "workpapers": data["workpapers"],
+        "workpapers": compact_workpapers_for_ai(data.get("workpapers")),
         "method_library": data.get("method_library", []),
         "warnings": data["warnings"],
     }
@@ -1461,6 +1931,144 @@ def add_detail_table_for_subject(
     detail_table_before(document, anchor, table)
 
 
+def subject_matches_workpaper_table(subject: str, table: Dict[str, Any]) -> bool:
+    subject_text = clean_subject_name(clean_text(subject))
+    subject_key = normalize_name(subject_text)
+    if not subject_key:
+        return False
+    title_scope_key = normalize_name(
+        f"{clean_text(table.get('sheet'))} {clean_text(table.get('title'))}"
+    )
+    if (
+        normalize_name("房屋建筑物") in subject_key
+        and "构筑物" in title_scope_key
+        and "房屋建筑物" not in title_scope_key
+    ):
+        return False
+    if (
+        normalize_name("构筑物及其他辅助设施") in subject_key
+        and "房屋建筑物" in title_scope_key
+        and "构筑物" not in title_scope_key
+    ):
+        return False
+    if (
+        normalize_name("构筑物及其他辅助设施") in subject_key
+        and "租金" in title_scope_key
+        and "构筑物" not in title_scope_key
+    ):
+        return False
+
+    hint_keys = [normalize_name(hint) for hint in table.get("subject_hints") or []]
+    if any(
+        subject_key == hint_key or subject_key in hint_key or hint_key in subject_key
+        for hint_key in hint_keys
+    ):
+        return True
+
+    metadata = " ".join(
+        clean_text(value)
+        for value in (
+            table.get("sheet"),
+            table.get("title"),
+            *(table.get("keywords") or []),
+            *(table.get("headers") or []),
+        )
+    )
+    metadata_key = normalize_name(metadata)
+    if subject_key in metadata_key:
+        return True
+
+    for canonical, aliases in WORKPAPER_SUBJECT_HINTS:
+        canonical_key = normalize_name(canonical)
+        alias_keys = [normalize_name(alias) for alias in aliases]
+        subject_is_alias = (
+            subject_key == canonical_key
+            or canonical_key in subject_key
+            or any(alias_key and alias_key in subject_key for alias_key in alias_keys)
+        )
+        if not subject_is_alias:
+            continue
+        if canonical_key in hint_keys or any(
+            alias_key and alias_key in metadata_key for alias_key in alias_keys
+        ):
+            return True
+    return False
+
+
+def workpaper_tables_for_subject(
+    data: Dict[str, Any],
+    subject: str,
+) -> List[Dict[str, Any]]:
+    if normalize_name(subject) in {
+        normalize_name("固定资产"),
+        normalize_name("无形资产"),
+        normalize_name("流动资产"),
+        normalize_name("非流动资产"),
+    }:
+        return []
+
+    options = data.get("_workpaper_table_options")
+    if not isinstance(options, dict):
+        options = {}
+    if not bool(options.get("enabled", True)):
+        return []
+    if not bool(options.get("insert_in_explanation_technical", True)):
+        return []
+
+    allowed_subjects = options.get("explanation_technical_subjects")
+    if isinstance(allowed_subjects, list) and allowed_subjects:
+        allowed = {normalize_name(item) for item in allowed_subjects}
+        if normalize_name(subject) not in allowed:
+            return []
+
+    max_tables = option_int(options, "max_tables_per_subject", 10)
+    matched = []
+    seen = set()
+    for workpaper in data.get("workpapers") or []:
+        if not isinstance(workpaper, dict):
+            continue
+        for table in workpaper.get("tables") or []:
+            if not isinstance(table, dict):
+                continue
+            if not table.get("headers") or not table.get("rows"):
+                continue
+            if not subject_matches_workpaper_table(subject, table):
+                continue
+            key = (
+                table.get("sheet"),
+                table.get("title"),
+                tuple(table.get("headers") or []),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            matched.append(table)
+            if len(matched) >= max_tables:
+                return matched
+    return matched
+
+
+def add_workpaper_tables_for_subject(
+    document: Document,
+    anchor: Paragraph,
+    data: Dict[str, Any],
+    subject: str,
+) -> None:
+    tables = workpaper_tables_for_subject(data, subject)
+    for table in tables:
+        title = clean_text(table.get("title")) or clean_text(table.get("sheet"))
+        file_name = clean_text(table.get("file_name")) or Path(
+            clean_text(table.get("source_file"))
+        ).name
+        sheet_name = clean_text(table.get("sheet"))
+        row_count = len(table.get("rows") or [])
+        paragraph_before(
+            anchor,
+            f"专项底稿表：{title}（来源：{file_name} / {sheet_name}，共{row_count}行）",
+        )
+        detail_table_before(document, anchor, table)
+
+
 def add_asset_descriptions(
     document: Document,
     anchor: Paragraph,
@@ -1526,6 +2134,12 @@ def add_section_objects_with_detail_tables(
                 data,
                 subject,
                 placement="explanation_technical",
+            )
+            add_workpaper_tables_for_subject(
+                document,
+                anchor,
+                data,
+                subject,
             )
 
 
@@ -1983,6 +2597,7 @@ def enrich_generated_sections(
 ) -> Dict[str, Any]:
     generated = json.loads(json.dumps(generated, ensure_ascii=False))
     data["_detail_table_options"] = rules.get("detail_tables", {})
+    data["_workpaper_table_options"] = workpaper_table_options(rules)
     report = generated.setdefault("report", {})
     explanation = generated.setdefault("explanation", {})
     scope_intro, asset_descriptions = build_programmatic_scope_sections(data)

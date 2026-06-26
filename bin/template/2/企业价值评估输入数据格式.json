@@ -129,6 +129,23 @@
       "visible_sheets": [],
       "valuation_method": "",
       "key_parameters": {},
+      "tables": [
+        {
+          "title": "",
+          "source_file": "",
+          "file_name": "",
+          "sheet": "",
+          "headers": [],
+          "rows": [
+            []
+          ],
+          "row_count": 0,
+          "column_count": 0,
+          "keywords": [],
+          "subject_hints": []
+        }
+      ],
+      "table_count": 0,
       "warnings": []
     }
   ],
